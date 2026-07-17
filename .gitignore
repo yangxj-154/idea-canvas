@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output（由 GitHub Actions 自动构建，无需提交）
+dist/
+dist-ssr/
+
+# logs
+*.log
+npm-debug.log*
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+*.local
+
+# edgeone cli
+.edgeone/

@@ -551,7 +551,7 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
     if (!report) return
     const blob = new Blob([report], { type: 'text/markdown' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a'); a.href = url; a.download = '想法画布报告.md'; a.click(); URL.revokeObjectURL(url)
+    const a = document.createElement('a'); a.href = url; a.download = 'LAPOP 报告.md'; a.click(); URL.revokeObjectURL(url)
   }
 
   const doImport = async () => {

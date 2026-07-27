@@ -8,6 +8,8 @@ import {
   MiniMap,
   useReactFlow,
   SelectionMode,
+  getNodesBounds,
+  getViewportForBounds,
 } from '@xyflow/react'
 import { useStore } from './store'
 import { NODE_TYPES, NODE_TYPE_KEYS } from './nodeTypes'
@@ -192,10 +194,11 @@ function Canvas() {
 
   const { rootOf, roots, membersOf } = useMemo(() => computeRoots(nodes, edges), [nodes, edges])
 
-  // 选中节点的「整条链路」：自身 + 所有祖先（沿 parent→child 向上回溯到根）
+  // 选中节点的「整条链路」：自身 + 所有祖先（向上）+ 所有后代（向下），双向高亮
   const chainSet = useMemo(() => {
     const set = new Set()
     if (!selectedNodeId) return set
+    // 向上：沿 source→target 回溯到根
     const parentOf = new Map()
     edges.forEach((e) => {
       if (!parentOf.has(e.target)) parentOf.set(e.target, e.source)
@@ -205,6 +208,22 @@ function Canvas() {
       if (set.has(cur)) break
       set.add(cur)
       cur = parentOf.get(cur)
+    }
+    // 向下：沿 target 遍历所有后代
+    const childrenOf = new Map()
+    edges.forEach((e) => {
+      if (!childrenOf.has(e.source)) childrenOf.set(e.source, [])
+      childrenOf.get(e.source).push(e.target)
+    })
+    const stack = [selectedNodeId]
+    while (stack.length) {
+      const c = stack.pop()
+      ;(childrenOf.get(c) || []).forEach((t) => {
+        if (!set.has(t)) {
+          set.add(t)
+          stack.push(t)
+        }
+      })
     }
     return set
   }, [selectedNodeId, edges])
@@ -247,7 +266,7 @@ function Canvas() {
     const { nodes: nn, edges: ee } = useStore.getState()
     const blob = new Blob([JSON.stringify({ nodes: nn, edges: ee }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a'); a.href = url; a.download = 'idea-canvas.json'; a.click(); URL.revokeObjectURL(url)
+    const a = document.createElement('a'); a.href = url; a.download = 'lapop.json'; a.click(); URL.revokeObjectURL(url)
   }
 
   // 导出 MD：先生成报告（调 AIPanel 的 report，弹出预览），用户确认后再在预览里下载
@@ -256,22 +275,39 @@ function Canvas() {
     aiPanelRef.current?.report()
   }
 
-  // 导出 PNG：截图画布区域预览，确认后下载
+  // 导出 PNG：截图画布 viewport（含连线），预览后下载
   const onExportPng = async () => {
     setExportOpen(false)
-    const el = canvasRef.current
-    if (!el) return
+    const rfNodes = useStore.getState().nodes
+    if (!rfNodes.length) {
+      alert('画布为空，暂无可导出的内容。')
+      return
+    }
+    const viewport = document.querySelector('.react-flow__viewport')
+    if (!viewport) return
     setCapturing(true)
     // 等一帧，确保隐藏项生效
     await new Promise((r) => setTimeout(r, 60))
     try {
-      const dataUrl = await toPng(el, {
+      const bounds = getNodesBounds(rfNodes)
+      const margin = 80
+      const width = Math.ceil(bounds.width + margin * 2)
+      const height = Math.ceil(bounds.height + margin * 2)
+      const transform = getViewportForBounds(bounds, width, height, 0.2, 2, 0.1)
+      const dataUrl = await toPng(viewport, {
         backgroundColor: '#F5F1E8',
+        width,
+        height,
         pixelRatio: 2,
+        style: {
+          width: `${width}px`,
+          height: `${height}px`,
+          transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.zoom})`,
+        },
         filter: (node) =>
-          !(node.classList?.contains('canvas-controls') ||
-            node.classList?.contains('react-flow__minimap') ||
-            node.classList?.contains('inspector') ||
+          !(node.classList?.contains('react-flow__minimap') ||
+            node.classList?.contains('react-flow__controls') ||
+            node.classList?.contains('react-flow__panel') ||
             node.classList?.contains('canvas-toolbar')),
       })
       setPngPreview(dataUrl)
@@ -287,7 +323,7 @@ function Canvas() {
     if (!pngPreview) return
     const a = document.createElement('a')
     a.href = pngPreview
-    a.download = 'idea-canvas.png'
+    a.download = 'lapop.png'
     a.click()
   }
 

@@ -14,11 +14,21 @@ export default defineConfig({
   define: {
     'import.meta.env.VITE_APP_VERSION': JSON.stringify(APP_VERSION),
   },
+  build: {
+    // 调试阶段开启 sourcemap，便于把 minified React 错误还原到源码行
+    sourcemap: true,
+  },
   plugins: [
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      injectRegister: 'auto',
+      // 改为手动注册：本地预览（localhost）不启用 SW，避免缓存旧产物导致刷新黑屏；
+      // 仅在生产域名（GitHub Pages）启用 PWA 离线缓存。
+      injectRegister: null,
+      // 加速接管：新 SW 安装后立即 claim 所有页面并跳过等待，
+      // 让浏览器尽快把「残留的旧 SW」更新为「会清理旧缓存的新 SW」，打破缓存死锁。
+      clientsClaim: true,
+      skipWaiting: true,
       manifest: {
         name: '想法画布',
         short_name: '画布',

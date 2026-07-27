@@ -1,10 +1,18 @@
 // AI 客户端：标准 OpenAI 兼容接口，默认 DeepSeek。
 // Key / baseURL / model 全部由用户在设置面板填写，仅存本机，应用直连厂商，数据不出机器。
+import { webSearch } from './search'
 
 export const DEFAULT_SETTINGS = {
-  baseURL: 'https://api.deepseek.com/v1',
+  baseURL: 'https://api.deepseek.com',
   apiKey: '',
   model: 'deepseek-v4-pro',
+  // 默认保留用户数据（关闭演示模式的每次清空）。需要清空时点「清空画布」。
+  resetOnStart: false,
+  // 联网搜索：'none' 仅模型知识库 | 'app' 应用侧搜索 API 注入(RAG) | 'model' 模型侧 web_search 工具
+  searchMode: 'none',
+  searchProvider: 'tavily', // 'tavily' | 'serpapi' | 'bing'
+  searchApiKey: '',
+  modelWebSearch: false,
 }
 
 // 边关系 -> 中文标签
@@ -42,13 +50,42 @@ async function fetchWithTimeout(url, options, timeoutMs = 15000) {
 export async function chatCompletion(settings, messages, opts = {}) {
   const { baseURL, apiKey, model } = settings
   if (!apiKey) throw new Error('未配置 API Key，请在设置中填写。')
+
+  // 联网搜索 · 应用侧 RAG：检索实时资料注入 system，让模型基于最新信息回答
+  let finalMessages = messages
+  const searchMode = settings.searchMode || 'none'
+  if (searchMode === 'app' && settings.searchApiKey) {
+    const q = [...messages].reverse().find((m) => m.role === 'user')?.content || ''
+    if (q) {
+      try {
+        const ctx = await webSearch(settings.searchProvider, settings.searchApiKey, q)
+        if (ctx) {
+          finalMessages = [
+            {
+              role: 'system',
+              content: `以下是联网检索到的实时资料，请在回答中优先参考，并在提及处标注来源链接：\n${ctx}`,
+            },
+            ...messages,
+          ]
+        }
+      } catch (e) {
+        // 检索失败不阻断对话，静默退化为纯模型回答
+        console.warn('联网检索失败，已退化为纯模型回答：', e)
+      }
+    }
+  }
+
   const url = `${baseURL.replace(/\/+$/, '')}/chat/completions`
   const body = {
     model: model || 'deepseek-v4-pro',
-    messages,
+    messages: finalMessages,
     temperature: opts.temperature ?? 0.7,
   }
   if (opts.jsonMode) body.response_format = { type: 'json_object' }
+  // 联网搜索 · 模型侧 web_search 工具（需厂商支持，如 OpenAI o 系列；由厂商执行搜索）
+  if (searchMode === 'model' && settings.modelWebSearch) {
+    body.tools = [{ type: 'web_search' }]
+  }
 
   const res = await fetchWithTimeout(
     url,
@@ -85,11 +122,6 @@ export async function chatCompletion(settings, messages, opts = {}) {
   const content = data?.choices?.[0]?.message?.content
   if (!content) throw new Error('模型返回为空。')
   return content
-}
-
-// 多轮深度讨论
-export async function discuss(settings, messages) {
-  return chatCompletion(settings, messages, { temperature: 0.85 })
 }
 
 // 拆解系统提示（全局 idea 模式）
@@ -136,30 +168,6 @@ schema：
 - rel 表示与父卡片的关系
 - 子节点 2~4 个，标题简洁（<=20字）
 - 只输出 JSON`
-
-// 拆解：把方向 / 卡片变成节点树
-// opts.anchor 存在时为下钻模式（只生成 children，挂到 anchor 下）
-// opts.learning 为纠错学习约束文本，注入系统提示
-export async function decompose(settings, direction, opts = {}) {
-  const { history = [], anchor = null, learning = '' } = opts
-  const system = (anchor ? DECOMPOSE_DRILL_SYSTEM : DECOMPOSE_SYSTEM) + (learning || '')
-  const messages = [
-    { role: 'system', content: system },
-    ...history.map((m) => ({ role: m.role, content: m.content })),
-    {
-      role: 'user',
-      content: anchor
-        ? `这是一张已存在的卡片：\n${direction}\n\n请只输出它的下一级子节点 children 数组（不要 root），按 schema 拆解。`
-        : `已确认方向：\n${direction}\n\n请按 schema 拆解成节点树 JSON。`,
-    },
-  ]
-  const text = await chatCompletion(settings, messages, {
-    temperature: 0.4,
-    jsonMode: true,
-    timeoutMs: 30000,
-  })
-  return parseTree(text)
-}
 
 // 容错解析：去掉可能的 ```json 包裹，截取首个 { 到末个 }
 export function parseTree(text) {
@@ -211,32 +219,6 @@ const OPTIMIZE_NODE_SYSTEM = `你是"卡片深度补全助手"。用户选中了
   "notes": "中文说明"
 }`
 
-// 优化画布：审查全部节点，返回补全 / 合并建议
-// opts.mode: 'global' 全局激进补全 | 'node' 针对选中卡片子树深度补全
-// opts.focusId / opts.focusContent / opts.subgraph 用于 node 模式
-export async function optimizeCanvas(settings, graph, opts = {}) {
-  const { mode = 'global', focusId = null, focusContent = '', subgraph = null } = opts
-  let system = OPTIMIZE_SYSTEM
-  let userContent = `当前画布：\n${JSON.stringify(graph, null, 2)}\n\n请输出优化 JSON。`
-  if (mode === 'node' && focusId) {
-    system = OPTIMIZE_NODE_SYSTEM
-    const subText = subgraph
-      ? `\n这部分子树：\n${JSON.stringify(subgraph, null, 2)}`
-      : ''
-    userContent = `用户选中的卡片（focus）：\nid: ${focusId}\n内容: ${focusContent}${subText}\n\n请只围绕这张卡片深度补全，输出 JSON。`
-  }
-  const messages = [
-    { role: 'system', content: system },
-    { role: 'user', content: userContent },
-  ]
-  const text = await chatCompletion(settings, messages, {
-    temperature: mode === 'node' ? 0.5 : 0.5,
-    jsonMode: true,
-    timeoutMs: 40000,
-  })
-  return parseOptimize(text)
-}
-
 export function parseOptimize(text) {
   let raw = (text || '').trim()
   const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
@@ -270,22 +252,6 @@ const RELATE_SYSTEM = `你是"实体关联助手"。用户画布上有很多卡�
 - 如果已存在同方向连线，不要再建议
 - 节点正文里提到的人名、龙名、地点、事件名是主要关联线索`
 
-export async function autoRelate(settings, graph) {
-  const messages = [
-    { role: 'system', content: RELATE_SYSTEM },
-    {
-      role: 'user',
-      content: `当前画布节点：\n${JSON.stringify(graph, null, 2)}\n\n请输出建议新增的连线 JSON。`,
-    },
-  ]
-  const text = await chatCompletion(settings, messages, {
-    temperature: 0.3,
-    jsonMode: true,
-    timeoutMs: 40000,
-  })
-  return parseRelate(text)
-}
-
 export function parseRelate(text) {
   let raw = (text || '').trim()
   const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
@@ -314,21 +280,6 @@ const REPORT_SYSTEM = `你是"画布报告助手"。用户会给你整张画布�
 （给出 2~4 条可执行建议）
 要求：严格基于画布真实内容，不要编造节点中不存在的信息；语言精炼、有洞察、可直接当作复盘文档。`
 
-export async function generateReport(settings, graph) {
-  const messages = [
-    { role: 'system', content: REPORT_SYSTEM },
-    {
-      role: 'user',
-      content: `画布数据：\n${JSON.stringify(graph, null, 2)}\n\n请生成报告（纯文本）。`,
-    },
-  ]
-  const text = await chatCompletion(settings, messages, {
-    temperature: 0.5,
-    timeoutMs: 45000,
-  })
-  return text
-}
-
 // 导入拆解系统提示：把一段"材料"（文章 / 笔记 / 会议纪要 / 聊天记录导出）提炼成图谱
 const IMPORT_SYSTEM = `你是"材料结构化助手"。用户会给你一段材料——可能是文章、笔记、会议纪要，或某个 AI 助手（ChatGPT / Claude / DeepSeek / 豆包等）的聊天记录导出文本。
 请提炼其中的主题与要点，拆成结构化节点树，只输出严格 JSON（不要 markdown 代码块，不要任何解释文字）。
@@ -356,8 +307,244 @@ schema：
 - 只输出 JSON`
 
 // 导入拆解：把材料 / 聊天记录提炼成节点树（复用 parseTree）
+// ============================================================
+//  演示模式（无需 API Key）：返回模拟数据，便于直接体验交互
+// ============================================================
+
+function isDemo(settings) {
+  return !settings || !settings.apiKey
+}
+
+// 把一段文本按标点/换行切成若干"要点"
+function splitPoints(text) {
+  return (text || '')
+    .split(/[\n。；;，,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+const MOCK_TYPES = ['direction', 'step', 'resource', 'insight']
+
+// 模拟多轮讨论回复（返回结构化数据：text + 标签芯片）
+export async function discuss(settings, messages) {
+  if (isDemo(settings)) {
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+    const topic = (lastUser?.content || '这个想法').slice(0, 40)
+    const round = messages.filter((m) => m.role === 'user').length
+    const replies = [
+      {
+        text: `收到！针对「${topic}」，我的分析如下：这是一个多层次的议题，建议用结构化的方式展开：`,
+        tags: [
+          { type: 'insight', label: '关键洞察' },
+          { type: 'direction', label: '技术路径' },
+          { type: 'step', label: 'STEP 1 — 数据收集' },
+          { type: 'step', label: 'STEP 2 — 建模分析' },
+          { type: 'idea', label: '创新点' },
+        ],
+      },
+      {
+        text: `关于「${topic}」，我从几个维度补充分析：\n\n1. 核心目标是否足够清晰？\n2. 有哪些关键假设需要验证？\n3. 可参考的资料和竞品有哪些？\n\n建议继续讨论，我会把节点落到右侧画布。`,
+        tags: [
+          { type: 'insight', label: '核心假设' },
+          { type: 'direction', label: '验证路径' },
+          { type: 'step', label: 'STEP 1 — 假设验证' },
+          { type: 'resource', label: '参考资料' },
+          { type: 'idea', label: '差异化' },
+        ],
+      },
+      {
+        text: `有意思！我们可以把「${topic}」拆解成几个方向来深入：\n\n每个方向都可以继续展开成具体步骤。你可以说"拆解落图"，节点会自动生长到画布上。`,
+        tags: [
+          { type: 'insight', label: '机会点' },
+          { type: 'direction', label: '方向 A' },
+          { type: 'direction', label: '方向 B' },
+          { type: 'step', label: 'STEP 1 — 第一步行动' },
+          { type: 'idea', label: 'MVP 想法' },
+        ],
+      },
+    ]
+    const idx = (round - 1) % replies.length
+    await new Promise((r) => setTimeout(r, 500))
+    return replies[Math.max(0, idx)]
+  }
+  // 真实模式：调用 API 获取文本，再附加基于上下文的标签
+  const text = await chatCompletion(settings, messages, { temperature: 0.85 })
+  const round = messages.filter((m) => m.role === 'user').length
+  // 根据轮次生成语义标签（真实模式下标签是辅助性的，主要靠 AI 文本）
+  const tagSets = [
+    [
+      { type: 'insight', label: '关键洞察' },
+      { type: 'direction', label: '技术路径' },
+      { type: 'step', label: 'STEP 1 — 数据收集' },
+      { type: 'step', label: 'STEP 2 — 建模分析' },
+      { type: 'idea', label: '创新点' },
+    ],
+    [
+      { type: 'insight', label: '核心假设' },
+      { type: 'direction', label: '验证路径' },
+      { type: 'step', label: 'STEP 1 — 假设验证' },
+      { type: 'resource', label: '参考资料' },
+      { type: 'idea', label: '差异化' },
+    ],
+    [
+      { type: 'insight', label: '机会点' },
+      { type: 'direction', label: '方向 A' },
+      { type: 'direction', label: '方向 B' },
+      { type: 'step', label: 'STEP 1 — 行动计划' },
+      { type: 'idea', label: 'MVP 想法' },
+    ],
+  ]
+  return { text, tags: tagSets[(round - 1) % tagSets.length] }
+}
+
+// 模拟拆解：把方向文本拆成结构化节点树
+export async function decompose(settings, direction, opts = {}) {
+  if (isDemo(settings)) {
+    const { anchor = null } = opts
+    await new Promise((r) => setTimeout(r, 600))
+    const root = (anchor ? (anchor.content || direction) : direction).toString().slice(0, 40) || '想法'
+    const points = splitPoints(direction)
+    const children = []
+    const seeds = points.length
+      ? points.slice(0, 6)
+      : ['目标与价值', '关键假设', '第一步动作', '可参考的资料']
+    seeds.forEach((p, i) => {
+      const type = MOCK_TYPES[i % MOCK_TYPES.length]
+      const sub = []
+      // 给 direction/step 再补一层子节点，让图谱更丰满
+      if (type === 'direction' || type === 'step') {
+        sub.push({ type: 'step', title: `${p.slice(0, 12)} · 具体动作`, body: '', rel: 'supports' })
+        sub.push({ type: 'resource', title: `${p.slice(0, 12)} · 参考资料`, body: '', rel: 'supports' })
+      }
+      children.push({
+        type,
+        title: p.slice(0, 20) || `${type} ${i + 1}`,
+        body: '',
+        rel: 'derives',
+        children: sub,
+      })
+    })
+    if (anchor) return { root: null, children }
+    return { root: { type: 'idea', title: root, body: '' }, children }
+  }
+  const { history = [], anchor = null, learning = '' } = opts
+  const system = (anchor ? DECOMPOSE_DRILL_SYSTEM : DECOMPOSE_SYSTEM) + (learning || '')
+  const messages = [
+    { role: 'system', content: system },
+    ...history.map((m) => ({ role: m.role, content: m.content })),
+    {
+      role: 'user',
+      content: anchor
+        ? `这是一张已存在的卡片：\n${direction}\n\n请只输出它的下一级子节点 children 数组（不要 root），按 schema 拆解。`
+        : `已确认方向：\n${direction}\n\n请按 schema 拆解成节点树 JSON。`,
+    },
+  ]
+  const text = await chatCompletion(settings, messages, {
+    temperature: 0.4,
+    jsonMode: true,
+    timeoutMs: 30000,
+  })
+  return parseTree(text)
+}
+
+// 模拟优化：基于现有节点补几个子节点
+export async function optimizeCanvas(settings, graph, opts = {}) {
+  if (isDemo(settings)) {
+    await new Promise((r) => setTimeout(r, 600))
+    const { mode = 'global', focusId = null } = opts
+    const parents = mode === 'node' && focusId
+      ? graph.nodes.filter((n) => n.id === focusId)
+      : graph.nodes.filter((n) => n.type === 'direction' || n.type === 'step').slice(0, 3)
+    const add = parents.map((p, i) => ({
+      parentId: p.id,
+      type: MOCK_TYPES[i % MOCK_TYPES.length],
+      title: `补充：${(p.content || '节点').slice(0, 10)}的下一步`,
+      body: '',
+    }))
+    return { add, merge: [], notes: '（演示模式）已基于现有结构补充若干节点，建议你在真实模式下让 AI 深度审查。' }
+  }
+  const { mode = 'global', focusId = null, focusContent = '', subgraph = null } = opts
+  let system = OPTIMIZE_SYSTEM
+  let userContent = `当前画布：\n${JSON.stringify(graph, null, 2)}\n\n请输出优化 JSON。`
+  if (mode === 'node' && focusId) {
+    system = OPTIMIZE_NODE_SYSTEM
+    const subText = subgraph
+      ? `\n这部分子树：\n${JSON.stringify(subgraph, null, 2)}`
+      : ''
+    userContent = `用户选中的卡片（focus）：\nid: ${focusId}\n内容: ${focusContent}${subText}\n\n请只围绕这张卡片深度补全，输出 JSON。`
+  }
+  const messages = [
+    { role: 'system', content: system },
+    { role: 'user', content: userContent },
+  ]
+  const text = await chatCompletion(settings, messages, {
+    temperature: mode === 'node' ? 0.5 : 0.5,
+    jsonMode: true,
+    timeoutMs: 40000,
+  })
+  return parseOptimize(text)
+}
+
+// 模拟关联：把前两个节点连起来
+export async function autoRelate(settings, graph) {
+  if (isDemo(settings)) {
+    await new Promise((r) => setTimeout(r, 400))
+    if (graph.nodes.length < 2) return []
+    return [
+      { source: graph.nodes[0].id, target: graph.nodes[1].id, rel: 'relates', reason: '（演示模式）同属一个想法脉络' },
+    ]
+  }
+  const messages = [
+    { role: 'system', content: RELATE_SYSTEM },
+    {
+      role: 'user',
+      content: `当前画布节点：\n${JSON.stringify(graph, null, 2)}\n\n请输出建议新增的连线 JSON。`,
+    },
+  ]
+  const text = await chatCompletion(settings, messages, {
+    temperature: 0.3,
+    jsonMode: true,
+    timeoutMs: 40000,
+  })
+  return parseRelate(text)
+}
+
+// 模拟报告
+export async function generateReport(settings, graph) {
+  if (isDemo(settings)) {
+    await new Promise((r) => setTimeout(r, 500))
+    const lines = graph.nodes.map((n) => `- 【${n.type}】${n.content || '（空）'}`).slice(0, 12)
+    return `# 主题概括\n（演示模式）这张画布围绕「${graph.nodes[0]?.content || '你的想法'}」展开。\n\n# 思路分层\n${lines.join('\n')}\n\n# 关键洞察\n- 演示模式下的报告为占位内容，填入 API Key 后由真实模型生成。\n\n# 下一步建议\n- 配置模型 API Key，让 AI 做真实审查与补全。`
+  }
+  const messages = [
+    { role: 'system', content: REPORT_SYSTEM },
+    {
+      role: 'user',
+      content: `画布数据：\n${JSON.stringify(graph, null, 2)}\n\n请生成报告（纯文本）。`,
+    },
+  ]
+  const text = await chatCompletion(settings, messages, {
+    temperature: 0.5,
+    timeoutMs: 45000,
+  })
+  return text
+}
+
+// 模拟导入拆解
 export async function decomposeImport(settings, text, opts = {}) {
   const { learning = '' } = opts
+  if (isDemo(settings)) {
+    await new Promise((r) => setTimeout(r, 600))
+    const points = splitPoints(text)
+    const children = (points.length ? points.slice(0, 5) : ['核心主题', '关键论点', '待办事项', '参考资料']).map((p, i) => ({
+      type: MOCK_TYPES[i % MOCK_TYPES.length],
+      title: p.slice(0, 20) || `要点 ${i + 1}`,
+      body: '',
+      rel: 'derives',
+      children: [],
+    }))
+    return { root: { type: 'idea', title: (text.slice(0, 30) || '导入材料'), body: '' }, children }
+  }
   const messages = [
     {
       role: 'system',

@@ -1,5 +1,4 @@
 import { nanoid } from 'nanoid'
-import { relLabel } from './ai'
 
 const X_GAP = 220
 const Y_GAP = 120
@@ -42,8 +41,13 @@ export function treeToGraph(tree, opts = {}) {
       for (const e of idMap.values()) e.y -= mid
     }
   } else {
-    const root = tree.root ? { ...tree.root, children: tree.children } : tree
-    assign(root, 0, null, null)
+    if (tree.root) {
+      assign({ ...tree.root, children: tree.children }, 0, null, null)
+    } else {
+      // 顶层没有 root（模型省略 root 时）：把 children 当作平行根节点直接布局，
+      // 避免在原位生成一个 content 为空的"幽灵节点"并连上子节点。
+      ;(tree.children || []).forEach((k) => assign(k, 0, null, k.rel))
+    }
   }
 
   const baseX = anchor ? anchor.position.x : origin.x
@@ -63,8 +67,6 @@ export function treeToGraph(tree, opts = {}) {
         id: `e-${e.parentId}-${e.id}`,
         source: e.parentId,
         target: e.id,
-        label: relLabel(e.rel),
-        type: 'smoothstep',
       })
     }
   }

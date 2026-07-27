@@ -3,6 +3,7 @@ import { Handle, Position } from '@xyflow/react'
 import { NODE_TYPES, NODE_TYPE_KEYS } from './nodeTypes'
 import { useStore } from './store'
 import { recordCorrection } from './corrections'
+import Markdown from './Markdown'
 
 export default function CustomNode({ id, data, selected }) {
   const cfg = NODE_TYPES[data.type] || NODE_TYPES.idea
@@ -10,8 +11,8 @@ export default function CustomNode({ id, data, selected }) {
   const deleteNode = useStore((s) => s.deleteNode)
   const setDetailNode = useStore((s) => s.setDetailNode)
   const [editing, setEditing] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const startRef = useRef(data.content)
-  const fileRef = useRef(null)
 
   // 仅 read === true 视为已读；其余（含存量无字段节点、手动新建）均为未读
   const read = data.read === true
@@ -39,20 +40,6 @@ export default function CustomNode({ id, data, selected }) {
     updateNodeData(id, { read: !read })
   }
 
-  const onPickImage = (e) => {
-    e.stopPropagation()
-    fileRef.current?.click()
-  }
-
-  const onFile = (e) => {
-    const f = e.target.files?.[0]
-    if (!f) return
-    const r = new FileReader()
-    r.onload = () => updateNodeData(id, { image: r.result })
-    r.readAsDataURL(f)
-    e.target.value = ''
-  }
-
   const openDetail = (e) => {
     // 不阻止冒泡：点击名称同时也选中卡片（便于下钻）
     if (!read) updateNodeData(id, { read: true })
@@ -61,13 +48,24 @@ export default function CustomNode({ id, data, selected }) {
 
   const lines = (data.content || '').split('\n')
   const keyword = (lines.find((l) => l.trim()) || '').slice(0, 40)
+  // 描述取第二行及以后的内容（保留换行，供 Markdown 渲染）
+  const descLines = lines.filter((l) => l.trim()).slice(1)
+  const description = descLines.join('\n')
+  const isLong = (data.content || '').length > 160
+
+  // 时间戳：用创建时间或当前时间
+  const timeStr = data.time || (() => {
+    const now = new Date()
+    return `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`
+  })()
 
   return (
     <div
-      className={`node-card${selected ? ' selected' : ''}${read ? ' read' : ''}`}
-      style={{ borderColor: cfg.color, background: cfg.bg }}
+      className={`node-card type-${data.type}${selected ? ' selected' : ''}${read ? ' read' : ''}`}
+      data-type={data.type}
     >
-      <div className="node-head" style={{ color: cfg.color }}>
+      {/* 头部：分类色标签（左上）+ 关闭（hover 显示） */}
+      <div className="node-head">
         <select
           className="node-type"
           value={data.type}
@@ -80,28 +78,12 @@ export default function CustomNode({ id, data, selected }) {
             </option>
           ))}
         </select>
-        <span
-          className={`read-badge ${read ? 'read' : 'unread'}`}
-          title={read ? '已读，点击标记未读' : '未读，点击标记已读'}
-          onClick={toggleRead}
-        >
-          {read ? '✓' : '●'}
-        </span>
-        <button className="node-img-btn" title="插入图片" onClick={onPickImage}>
-          🖼
-        </button>
         <button className="node-del" title="删除卡片" onClick={onDelete}>
           ×
         </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          style={{ display: 'none' }}
-          onChange={onFile}
-        />
       </div>
 
+      {/* 主体：标题 + 描述 + 时间戳 */}
       <div className="node-body" onDoubleClick={enterEdit}>
         {editing ? (
           <textarea
@@ -118,8 +100,23 @@ export default function CustomNode({ id, data, selected }) {
               title="点击查看详细说明"
               onClick={openDetail}
             >
-              {keyword ? keyword : <span className="node-ph">双击编辑…</span>}
+              {keyword ? <Markdown inline>{keyword}</Markdown> : <span className="node-ph">双击编辑…</span>}
             </div>
+            {description && (
+              <>
+                <div className={`node-desc${isLong && !expanded ? ' clamp' : ''}`}>
+                  <Markdown>{description}</Markdown>
+                </div>
+                {isLong && (
+                  <button
+                    className="node-fold"
+                    onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v) }}
+                  >
+                    {expanded ? '收起 ▲' : '展开全文 ▼'}
+                  </button>
+                )}
+              </>
+            )}
             {data.url && (
               <a
                 className="node-link"
@@ -144,6 +141,7 @@ export default function CustomNode({ id, data, selected }) {
                 }}
               />
             )}
+            <div className="node-time">{timeStr}</div>
           </>
         )}
       </div>

@@ -1,36 +1,56 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { createPortal } from 'react-dom'
 import { useReactFlow } from '@xyflow/react'
 import { nanoid } from 'nanoid'
 import { useStore } from './store'
+import { NODE_TYPES } from './nodeTypes'
 import { loadSettings, saveSettings, loadChat, saveChat } from './settings'
-import { DEFAULT_SETTINGS, discuss, decompose, optimizeCanvas, autoRelate, generateReport, relLabel, decomposeImport } from './ai'
+import { DEFAULT_SETTINGS, discuss, decompose, optimizeCanvas, autoRelate, generateReport, decomposeImport } from './ai'
 import { treeToGraph } from './treeLayout'
 import { buildLearningSummary } from './corrections'
 import { readFileAsText } from './importFile'
 
-export default function AIPanel() {
+const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onStatus }, ref) {
   const { screenToFlowPosition, fitView } = useReactFlow()
   const addNodesAndEdges = useStore((s) => s.addNodesAndEdges)
   const selectedNode = useStore((s) =>
     s.nodes.find((n) => n.id === s.selectedNodeId),
   )
+  // 框选得到的多卡片上下文集合
+  const selectedNodeIds = useStore((s) => s.selectedNodeIds)
+  const allNodes = useStore((s) => s.nodes)
+  const clearSelection = useStore((s) => s.clearSelection)
+  const deselectNodes = useStore((s) => s.deselectNodes)
+  const setSelectedNode = useStore((s) => s.setSelectedNode)
+  // 在上下文芯片上点「下钻」：先选中该卡再进入下钻
+  const drillCard = (id) => { setSelectedNode(id); enterDrill() }
 
   const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS })
   const [messages, setMessages] = useState([])
-  const [input, setInput] = useState('')
+  // 当有外部输入时，input 状态由外部管理；否则用内部状态
+  const [internalInput, setInternalInput] = useState('')
+  const input = externalInput?.value ?? internalInput
+  const setInput = externalInput?.onChange ?? setInternalInput
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [showSettings, setShowSettings] = useState(false)
-  const [collapsed, setCollapsed] = useState(false)
+  const collapsed = useStore((s) => s.collapsed)
+  const setCollapsed = useStore((s) => s.setCollapsed)
   const [showKey, setShowKey] = useState(false)
   const [report, setReport] = useState(null)
   const [reportBusy, setReportBusy] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')
   const [importFileObj, setImportFileObj] = useState(null)
+  const [importUrl, setImportUrl] = useState('')
   const [importBusy, setImportBusy] = useState(false)
   const [importErr, setImportErr] = useState('')
+  const [clearConfirm, setClearConfirm] = useState(false)
   const scrollRef = useRef(null)
+  // 标记历史会话是否已载入：载入前不持久化，避免挂载时的空值覆盖磁盘旧数据
+  const chatLoaded = useRef(false)
+
+  // 标签芯片：从 AI 回复消息对象（m.tags）渲染，无需额外状态
 
   // 下钻模式：针对某张卡片提问并拆解
   const [mode, setMode] = useState('global')
@@ -41,11 +61,18 @@ export default function AIPanel() {
   useEffect(() => {
     loadSettings().then((s) => {
       if (s) setSettings((p) => ({ ...p, ...s }))
-    })
-    loadChat().then((c) => {
-      if (c) {
-        if (Array.isArray(c.messages)) setMessages(c.messages)
-        if (c.threads && typeof c.threads === 'object') setThreads(c.threads)
+      // 开发/演示模式：resetOnStart 时不加载历史会话，保持初始空对话
+      if (!s?.resetOnStart) {
+        loadChat().then((c) => {
+          if (c) {
+            if (Array.isArray(c.messages)) setMessages(c.messages)
+            if (c.threads && typeof c.threads === 'object') setThreads(c.threads)
+          }
+          // 无论是否有历史数据，载入流程结束后再允许持久化
+          chatLoaded.current = true
+        })
+      } else {
+        chatLoaded.current = true
       }
     })
   }, [])
@@ -56,6 +83,7 @@ export default function AIPanel() {
 
   // 会话持久化：主会话 + 各节点下钻对话，防抖写入本地
   useEffect(() => {
+    if (!chatLoaded.current) return
     const t = setTimeout(() => saveChat({ messages, threads }), 400)
     return () => clearTimeout(t)
   }, [messages, threads])
@@ -83,13 +111,26 @@ export default function AIPanel() {
     setFocus(null)
   }
 
+  // ===== 暴露给外部（底栏）调用的方法 =====
+  useImperativeHandle(ref, () => ({
+    send,
+    optimize: doOptimize,
+    // 全局模式拆解：不传参时内部回退到最近一条用户消息作为方向
+    decompose: () => doDecompose(),
+    relate: doRelate,
+    report: doReport,
+    showImport: () => setShowImport(true),
+    toggleSettings: () => setShowSettings(v => !v),
+    isCollapsed: collapsed,
+    expand: () => setCollapsed(false),
+    scrollToType: (type) => scrollToTagType(type),
+  }))
+
   const send = async () => {
     const text = input.trim()
     if (!text || busy) return
     if (!settings.apiKey) {
-      setError('请先在「设置」中填写 API Key。')
-      setShowSettings(true)
-      return
+      // 演示模式（未配置 Key）：不拦截，走 mock 数据，下方已有「演示模式」标识提示
     }
     setError('')
     setInput('')
@@ -97,10 +138,7 @@ export default function AIPanel() {
     if (mode === 'node' && focus) {
       const thread = threads[focus.id] || []
       const full = [
-        {
-          role: 'system',
-          content: `你正在围绕这张卡片进行讨论，卡片内容：\n${focus.content}`,
-        },
+        { role: 'system', content: `你正在围绕这张卡片进行讨论，卡片内容：\n${focus.data?.content || ''}` },
         ...thread,
         { role: 'user', content: text },
       ]
@@ -109,14 +147,18 @@ export default function AIPanel() {
         [focus.id]: [...(t[focus.id] || []), { role: 'user', content: text }],
       }))
       setBusy(true)
+      onStatus?.('LAPOP 正在输出...')
       try {
-        const reply = await discuss(settings, full)
+        const result = await discuss(settings, full)
+        const reply = result?.text ?? result
+        const tags = result?.tags || []
         setThreads((t) => ({
           ...t,
-          [focus.id]: [...(t[focus.id] || []), { role: 'assistant', content: reply }],
+          [focus.id]: [...(t[focus.id] || []), { role: 'assistant', content: reply, tags }],
         }))
       } catch (e) {
         setError(e.message || '请求出错')
+        onStatus?.('没憋出来，再补点细节试试')
       } finally {
         setBusy(false)
       }
@@ -124,33 +166,79 @@ export default function AIPanel() {
       const next = [...messages, { role: 'user', content: text }]
       setMessages(next)
       setBusy(true)
+      onStatus?.('LAPOP 正在输出...')
       try {
-        const reply = await discuss(settings, next)
-        setMessages([...next, { role: 'assistant', content: reply }])
+        // 多卡片上下文：框选的卡片拼成 system 提示词，仅用于本次请求，不写入可见历史
+        const ctxCards = allNodes.filter((n) => selectedNodeIds.includes(n.id))
+        const ctxMsg = ctxCards.length
+          ? {
+              role: 'system',
+              content:
+                '以下是用户框选作为本次回答上下文的画布卡片（序号对应画布中的卡片）：\n' +
+                ctxCards
+                  .map(
+                    (n, i) =>
+                      `【卡片${i + 1} | ${NODE_TYPES[n.data?.type]?.label || '想法'}】\n${n.data?.content || ''}`,
+                  )
+                  .join('\n\n'),
+            }
+          : null
+        const apiMessages = ctxMsg ? [ctxMsg, ...next] : next
+        const result = await discuss(settings, apiMessages)
+        const reply = result?.text ?? result
+        const tags = result?.tags || []
+        setMessages([...next, { role: 'assistant', content: reply, tags }])
+        // 不再自动落图：拆解需用户主动触发（见「拆解落图」按钮 / 聊满 3 轮后的引导）
       } catch (e) {
         setError(e.message || '请求出错')
+        onStatus?.('没憋出来，再补点细节试试')
       } finally {
         setBusy(false)
       }
     }
   }
 
-  const doDecompose = async () => {
-    if (!settings.apiKey) {
-      setError('请先在「设置」中填写 API Key。')
-      setShowSettings(true)
+  // 标签芯片点击：聚焦画布上同类节点并高亮闪烁；若还没有，温和提示去拆解
+  const focusTagType = (tagType) => {
+    const st = useStore.getState()
+    const realType = tagType === 'dir' ? 'direction' : tagType
+    const matches = st.nodes.filter((n) => n.data.type === realType)
+    if (matches.length === 0) {
+      setError('画布上暂无同类节点，点「拆解落图」即可生成。')
       return
+    }
+    fitView({ nodes: matches.map((n) => ({ id: n.id })), padding: 0.2, duration: 400, maxZoom: 1.2 })
+    // 高亮闪烁对应节点
+    setTimeout(() => {
+      document.querySelectorAll(`[data-type="${realType}"] .node-card`).forEach((el) => {
+        el.classList.add('node-flash')
+        setTimeout(() => el.classList.remove('node-flash'), 900)
+      })
+    }, 450)
+  }
+
+  // 画布节点点击 → 对话区自动滚动到对应段落
+  const scrollToTagType = (type) => {
+    if (!type) return
+    const msgs = mode === 'node' && focus ? threads[focus.id] || [] : messages
+    const idx = msgs.findLastIndex((m) =>
+      m.role === 'assistant' && m.tags?.some((t) => t.type === type || (type === 'direction' && t.type === 'dir')),
+    )
+    if (idx === -1 || !scrollRef.current) return
+    const el = scrollRef.current.children[idx]
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  const doDecompose = async (forcedDirection, forcedHistory) => {
+    if (!settings.apiKey) {
+      // 演示模式（未配置 Key）：不拦截，走 mock 数据，下方已有「演示模式」标识提示
     }
     let direction
     let history
     let anchor = null
     if (mode === 'node' && focus) {
-      direction =
-        focus.content ||
-        (threads[focus.id] || [])
-          .filter((m) => m.role === 'user')
-          .slice(-1)[0]?.content ||
-        ''
+      direction = focus.data?.content ||
+        (threads[focus.id] || []).filter((m) => m.role === 'user').slice(-1)[0]?.content || ''
       if (!direction) {
         setError('卡片为空，且没有提问内容。先给卡片写几个字或提问后再拆解。')
         return
@@ -158,22 +246,22 @@ export default function AIPanel() {
       history = threads[focus.id] || []
       anchor = focus
     } else {
-      direction = input.trim() || lastUserText()
+      direction = forcedDirection || input.trim() || lastUserText()
       if (!direction) {
         setError('先输入想法，或先和 AI 讨论。')
         return
       }
-      history = messages
+      history = forcedHistory || messages
     }
     setError('')
     setBusy(true)
+    onStatus?.('LAPOP 正在输出...')
     try {
       const learning = await buildLearningSummary()
       const tree = await decompose(settings, direction, { history, anchor, learning })
       const st = useStore.getState()
       let origin
       if (anchor) {
-        // 下钻：子节点从父节点右侧展开，后续 treeToGraph 会基于 anchor 位置
         origin = { x: focus.position.x, y: focus.position.y }
       } else if (st.nodes.length === 0) {
         const center = screenToFlowPosition({
@@ -182,18 +270,13 @@ export default function AIPanel() {
         })
         origin = { x: center.x, y: center.y }
       } else {
-        // 新想法：放在现有画布最右侧，避免与旧节点重叠
         origin = findFreeTreeOrigin(st.nodes)
       }
-      const { nodes, edges } = treeToGraph(
-        tree,
-        anchor ? { anchor } : { origin },
-      )
-      addNodesAndEdges(nodes, edges)
+      const { nodes: dNodes, edges: dEdges } = treeToGraph(tree, anchor ? { anchor } : { origin })
+      addNodesAndEdges(dNodes, dEdges)
       setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 60)
-      const summary = `已拆解，生成 ${nodes.length} 个节点、${edges.length} 条连线${
-        anchor ? '，挂在该卡片下' : ''
-      }。`
+      onStatus?.(`POP！已生成 ${dNodes.length} 个节点`)
+      const summary = `已拆解，生成 ${dNodes.length} 个节点、${dEdges.length} 条连线${anchor ? '，挂在该卡片下' : ''}`
       if (mode === 'node') {
         setThreads((t) => ({
           ...t,
@@ -204,18 +287,16 @@ export default function AIPanel() {
       }
     } catch (e) {
       setError(e.message || '拆解失败')
+      onStatus?.('没憋出来，再补点细节试试')
     } finally {
       setBusy(false)
     }
   }
 
-  // 给新树找一个不重叠的起点：现有内容最右侧、y 与最上方节点对齐
   function findFreeTreeOrigin(nodes, gap = 260) {
     if (!nodes.length) return { x: 0, y: 0 }
     const minY = Math.min(...nodes.map((n) => n.position.y))
-    const maxX = Math.max(
-      ...nodes.map((n) => n.position.x + (n.width || 170)),
-    )
+    const maxX = Math.max(...nodes.map((n) => n.position.x + (n.width || 170)))
     return { x: maxX + gap, y: minY }
   }
 
@@ -230,52 +311,40 @@ export default function AIPanel() {
     while (queue.length) {
       const cur = queue.shift()
       for (const c of childMap.get(cur) || []) {
-        if (!ids.has(c)) {
-          ids.add(c)
-          queue.push(c)
-        }
+        if (!ids.has(c)) { ids.add(c); queue.push(c) }
       }
     }
     return {
-      nodes: st.nodes
-        .filter((n) => ids.has(n.id))
-        .map((n) => ({ id: n.id, type: n.data.type, content: n.data.content })),
-      edges: st.edges
-        .filter((e) => ids.has(e.source) && ids.has(e.target))
-        .map((e) => ({ source: e.source, target: e.target, label: e.label })),
+      nodes: st.nodes.filter((n) => ids.has(n.id)).map((n) => ({ id: n.id, type: n.data.type, content: n.data.content })),
+      edges: st.edges.filter((e) => ids.has(e.source) && ids.has(e.target)).map((e) => ({ source: e.source, target: e.target })),
     }
   }
 
   const doOptimize = async () => {
     if (!settings.apiKey) {
-      setError('请先在「设置」中填写 API Key。')
-      setShowSettings(true)
-      return
+      // 演示模式（未配置 Key）：不拦截，走 mock 数据，下方已有「演示模式」标识提示
     }
     setError('')
     setBusy(true)
+    onStatus?.('LAPOP 正在输出...')
     try {
       const st = useStore.getState()
       const graph = {
-        nodes: st.nodes.map((n) => ({
-          id: n.id,
-          type: n.data.type,
-          content: n.data.content,
-        })),
-        edges: st.edges.map((e) => ({
-          source: e.source,
-          target: e.target,
-          label: e.label,
-        })),
+        nodes: st.nodes.map((n) => ({ id: n.id, type: n.data.type, content: n.data.content })),
+        edges: st.edges.map((e) => ({ source: e.source, target: e.target })),
       }
       if (!graph.nodes.length) {
         setError('画布是空的，先放点东西再优化。')
         setBusy(false)
         return
       }
+      // 重新排版：分层树布局，卡片不再重叠
+      const layout = layoutTree(st.nodes, st.edges)
+      st.setNodes((ns) => ns.map((n) => (layout[n.id] ? { ...n, position: layout[n.id] } : n)))
+      const laidNodes = useStore.getState().nodes
       const selId = st.selectedNodeId
       const selNode = selId ? st.nodes.find((n) => n.id === selId) : null
-      const subgraph = selNode ? collectSubgraph(st, selId) : null
+      const subgraph = selNode ? collectSubgraph(st, selNode) : null
       const res = await optimizeCanvas(settings, graph, {
         mode: selNode ? 'node' : 'global',
         focusId: selNode?.id || null,
@@ -285,44 +354,28 @@ export default function AIPanel() {
       const newNodes = []
       const newEdges = []
       res.add.forEach((a) => {
-        const parent = st.nodes.find((n) => n.id === a.parentId) || st.nodes[0]
+        const parent = laidNodes.find((n) => n.id === a.parentId) || st.nodes.find((n) => n.id === a.parentId) || st.nodes[0]
         if (!parent) return
         const id = nanoid(6)
-        const pos = findFreePosition(parent, [...st.nodes, ...newNodes])
+        const pos = findFreePosition(parent, [...laidNodes, ...newNodes])
         newNodes.push({
-          id,
-          type: 'custom',
-          position: pos,
-          data: {
-            type: a.type || 'step',
-            content: [a.title, a.body].filter(Boolean).join('\n'),
-            ai: true,
-            read: false,
-          },
+          id, type: 'custom', position: pos,
+          data: { type: a.type || 'step', content: [a.title, a.body].filter(Boolean).join('\n'), ai: true, read: false },
         })
-        newEdges.push({
-          id: `e-${a.parentId}-${id}`,
-          source: a.parentId,
-          target: id,
-          type: 'smoothstep',
-          label: '',
-          data: { read: false },
-        })
+        newEdges.push({ id: `e-${a.parentId}-${id}`, source: a.parentId, target: id, data: { read: false } })
       })
       const delIds = []
       res.merge.forEach(([aId, bId]) => {
         const a = st.nodes.find((n) => n.id === aId)
         const b = st.nodes.find((n) => n.id === bId)
         if (a && b) {
-          const merged =
-            (a.data.content ? a.data.content + '\n' : '') + (b.data.content || '')
+          const merged = (a.data.content ? a.data.content + '\n' : '') + (b.data.content || '')
           st.updateNodeData(aId, { content: merged })
           delIds.push(bId)
         }
       })
       if (delIds.length) delIds.forEach((id) => st.deleteNode(id))
       if (newNodes.length) st.addNodesAndEdges(newNodes, newEdges)
-      // 优化后自动补一次全局关联连线
       let relCount = 0
       try {
         const suggested = await autoRelate(settings, graph)
@@ -334,43 +387,97 @@ export default function AIPanel() {
           if (existing.has(key)) continue
           existing.add(key)
           relEdges.push({
-            id: `e-rel-${ed.source}-${ed.target}`,
-            source: ed.source,
-            target: ed.target,
-            type: 'smoothstep',
-            label: relLabel(ed.rel),
+            id: `e-rel-${ed.source}-${ed.target}`, source: ed.source, target: ed.target,
             data: { reason: ed.reason || '' },
           })
         }
         if (relEdges.length) st.addNodesAndEdges([], relEdges)
         relCount = relEdges.length
-      } catch {
-        /* 关联失败不阻断优化主流程 */
-      }
+      } catch { /* 不阻断 */ }
       setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 80)
-      const summary = `优化完成：新增 ${newNodes.length} 个节点，合并 ${res.merge.length} 组，新增关联 ${relCount} 条。${
-        res.notes ? '\n' + res.notes : ''
-      }`
+      const summary = `优化完成：新增 ${newNodes.length} 个节点，合并 ${res.merge.length} 组，新增关联 ${relCount} 条。${res.notes ? '\n' + res.notes : ''}`
       setMessages((m) => [...m, { role: 'assistant', content: summary }])
+      onStatus?.(`POP！已优化 ${newNodes.length + res.merge.length + relCount} 处`)
     } catch (e) {
       setError(e.message || '优化失败')
+      onStatus?.('没憋出来，再补点细节试试')
     } finally {
       setBusy(false)
     }
   }
 
+  // 分层树布局：按 parent→child 还原层级，避免卡片重叠（优化画布用）
+  // 多个想法根时，每棵树独立排版后水平排列，不再重叠。
+  function layoutTree(nodes, edges) {
+    const childMap = new Map()
+    const hasParent = new Set()
+    edges.forEach((e) => {
+      if (!childMap.has(e.source)) childMap.set(e.source, [])
+      childMap.get(e.source).push(e.target)
+      hasParent.add(e.target)
+    })
+    let roots = nodes.filter((n) => !hasParent.has(n.id)).map((n) => n.id)
+    if (roots.length === 0 && nodes.length) roots = [nodes[0].id]
+
+    const COL = 240
+    const ROWGAP = 100
+    const TREE_GAP = 340 // 棵树之间的水平间距
+
+    // 对单棵子树做 BFS 分层布局，返回 { pos, maxDepth, nodeCount }
+    function layoutSubtree(rootId) {
+      const depthOf = new Map()
+      const order = []
+      const queue = [[rootId, 0]]
+      depthOf.set(rootId, 0)
+      while (queue.length) {
+        const [id, d] = queue.shift()
+        order.push([id, d])
+        for (const c of childMap.get(id) || []) {
+          if (!depthOf.has(c)) { depthOf.set(c, d + 1); queue.push([c, d + 1]) }
+        }
+      }
+      const byDepth = new Map()
+      order.forEach(([id, d]) => {
+        if (!byDepth.has(d)) byDepth.set(d, [])
+        byDepth.get(d).push(id)
+      })
+      const pos = {}
+      byDepth.forEach((ids, d) => {
+        ids.forEach((id, i) => { pos[id] = { x: d * COL, y: i * ROWGAP } })
+      })
+      return { pos, maxDepth: byDepth.size ? Math.max(...byDepth.keys()) : 0, count: order.length }
+    }
+
+    // 每棵树独立布局，再水平拼接
+    const subtrees = roots.map((r) => layoutSubtree(r))
+    const pos = {}
+    let xOffset = 0
+    for (const st of subtrees) {
+      for (const [id, p] of Object.entries(st.pos)) {
+        pos[id] = { x: p.x + xOffset, y: p.y }
+      }
+      xOffset += (st.maxDepth + 1) * COL + TREE_GAP
+    }
+
+    // 游离节点放最后
+    const maxGlobalX = xOffset
+    let orphan = 0
+    nodes.forEach((n) => {
+      if (!pos[n.id]) { pos[n.id] = { x: maxGlobalX, y: orphan * ROWGAP }; orphan++ }
+    })
+    return pos
+  }
+
   function findFreePosition(parentNode, allNodes, w = 170, h = 70) {
     const target = parentNode.position
     const others = allNodes.filter((n) => n.id !== parentNode.id)
-    const xStep = 180
-    const yStep = 70
+    const xStep = 180, yStep = 70
     for (let col = 0; col < 6; col++) {
       for (let row = -3; row <= 10; row++) {
         const x = target.x + 200 + col * xStep
         const y = target.y + row * yStep
         const overlap = others.some((n) => {
-          const nw = n.width || 170
-          const nh = n.height || 70
+          const nw = n.width || 170, nh = n.height || 70
           const nx = n.position.x + nw / 2
           const ny = n.position.y + nh / 2
           return (
@@ -386,31 +493,17 @@ export default function AIPanel() {
 
   const doRelate = async () => {
     if (!settings.apiKey) {
-      setError('请先在「设置」中填写 API Key。')
-      setShowSettings(true)
-      return
+      // 演示模式：走 mock 关联，不拦截
     }
-    setError('')
-    setBusy(true)
+    setError(''); setBusy(true)
+    onStatus?.('LAPOP 正在输出...')
     try {
       const st = useStore.getState()
       const graph = {
-        nodes: st.nodes.map((n) => ({
-          id: n.id,
-          type: n.data.type,
-          content: n.data.content,
-        })),
-        edges: st.edges.map((e) => ({
-          source: e.source,
-          target: e.target,
-          label: e.label,
-        })),
+        nodes: st.nodes.map((n) => ({ id: n.id, type: n.data.type, content: n.data.content })),
+        edges: st.edges.map((e) => ({ source: e.source, target: e.target })),
       }
-      if (graph.nodes.length < 2) {
-        setError('至少要有两张卡片才能自动关联。')
-        setBusy(false)
-        return
-      }
+      if (graph.nodes.length < 2) { setError('至少要有两张卡片才能自动关联。'); setBusy(false); return }
       const suggested = await autoRelate(settings, graph)
       const existing = new Set(st.edges.map((e) => `${e.source}-${e.target}`))
       const newEdges = []
@@ -419,25 +512,14 @@ export default function AIPanel() {
         const key = `${ed.source}-${ed.target}`
         if (existing.has(key)) continue
         existing.add(key)
-        newEdges.push({
-          id: `e-${ed.source}-${ed.target}`,
-          source: ed.source,
-          target: ed.target,
-          type: 'smoothstep',
-          label: relLabel(ed.rel),
-          data: { reason: ed.reason || '' },
-        })
+        newEdges.push({ id: `e-${ed.source}-${ed.target}`, source: ed.source, target: ed.target, data: { reason: ed.reason || '' } })
       }
       if (newEdges.length) st.addNodesAndEdges([], newEdges)
-      setMessages((m) => [
-        ...m,
-        {
-          role: 'assistant',
-          content: `自动关联完成：新增 ${newEdges.length} 条连线。`,
-        },
-      ])
+      setMessages((m) => [...m, { role: 'assistant', content: `自动关联完成：新增 ${newEdges.length} 条连线。` }])
+      onStatus?.(`POP！已新增 ${newEdges.length} 条关联`)
     } catch (e) {
       setError(e.message || '自动关联失败')
+      onStatus?.('没憋出来，再补点细节试试')
     } finally {
       setBusy(false)
     }
@@ -445,34 +527,21 @@ export default function AIPanel() {
 
   const doReport = async () => {
     if (!settings.apiKey) {
-      setError('请先在「设置」中填写 API Key。')
-      setShowSettings(true)
-      return
+      // 演示模式：走 mock 报告，不拦截
     }
     const st = useStore.getState()
-    if (!st.nodes.length) {
-      setError('画布是空的，先放点东西再生成报告。')
-      return
-    }
-    setError('')
-    setReportBusy(true)
+    if (!st.nodes.length) { setError('画布是空的，先放点东西再生成报告。'); return }
+    setError(''); setReportBusy(true)
     try {
       const graph = {
-        nodes: st.nodes.map((n) => ({
-          id: n.id,
-          type: n.data.type,
-          content: n.data.content,
-        })),
-        edges: st.edges.map((e) => ({
-          source: e.source,
-          target: e.target,
-          label: e.label,
-        })),
+        nodes: st.nodes.map((n) => ({ id: n.id, type: n.data.type, content: n.data.content })),
+        edges: st.edges.map((e) => ({ source: e.source, target: e.target, label: e.label })),
       }
       const text = await generateReport(settings, graph)
       setReport(text)
     } catch (e) {
       setError(e.message || '生成报告失败')
+      onStatus?.('没憋出来，再补点细节试试')
     } finally {
       setReportBusy(false)
     }
@@ -482,320 +551,357 @@ export default function AIPanel() {
     if (!report) return
     const blob = new Blob([report], { type: 'text/markdown' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = '想法画布报告.md'
-    a.click()
-    URL.revokeObjectURL(url)
+    const a = document.createElement('a'); a.href = url; a.download = '想法画布报告.md'; a.click(); URL.revokeObjectURL(url)
   }
 
-  // 导入材料 / 聊天记录 → AI 提炼成图谱
   const doImport = async () => {
     if (!settings.apiKey) {
-      setError('请先在「设置」中填写 API Key。')
-      setShowSettings(true)
-      return
+      // 演示模式：走 mock 导入拆解，不拦截
     }
     let text = importText.trim()
     if (importFileObj) {
-      setImportBusy(true)
-      setImportErr('')
+      setImportBusy(true); setImportErr('')
+      try { text = (await readFileAsText(importFileObj)).trim() }
+      catch (e) { setImportBusy(false); setImportErr(e.message || '文件解析失败'); return }
+    }
+    // 链接框：尽力抓取（浏览器受 CORS 限制，多数分享页会失败，失败则提示粘贴文本）
+    if (!text && importUrl.trim()) {
+      setImportBusy(true); setImportErr('')
       try {
-        text = (await readFileAsText(importFileObj)).trim()
+        const resp = await fetch(importUrl.trim())
+        const html = await resp.text()
+        text = html
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
       } catch (e) {
         setImportBusy(false)
-        setImportErr(e.message || '文件解析失败')
+        setImportErr('无法抓取该链接（可能被跨域策略拦截）。请直接复制聊天文本粘贴，或导出文件后上传。')
         return
       }
     }
-    if (!text) {
-      setImportErr('先粘贴内容，或选择一个 .md / .txt / .docx / .pdf 文件。')
-      return
-    }
-    setImportErr('')
-    setImportBusy(true)
+    if (!text) { setImportErr('先粘贴内容、上传文件，或填入一个可访问的分享链接。'); return }
+    setImportErr(''); setImportBusy(true)
+    onStatus?.('LAPOP 正在输出...')
     try {
       const learning = await buildLearningSummary()
       const tree = await decomposeImport(settings, text, { learning })
       const st = useStore.getState()
-      const origin =
-        st.nodes.length === 0
-          ? (() => {
-              const c = screenToFlowPosition({
-                x: window.innerWidth / 2 - 220,
-                y: window.innerHeight / 2,
-              })
-              return { x: c.x, y: c.y }
-            })()
-          : findFreeTreeOrigin(st.nodes)
+      const origin = st.nodes.length === 0
+        ? (() => { const c = screenToFlowPosition({ x: window.innerWidth / 2 - 220, y: window.innerHeight / 2 }); return { x: c.x, y: c.y } })()
+        : findFreeTreeOrigin(st.nodes)
       const { nodes, edges } = treeToGraph(tree, { origin })
       addNodesAndEdges(nodes, edges)
       setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 60)
-      setMessages((m) => [
-        ...m,
-        {
-          role: 'assistant',
-          content: `已从材料拆解，生成 ${nodes.length} 个节点、${edges.length} 条连线。`,
-        },
-      ])
-      setShowImport(false)
-      setImportText('')
-      setImportFileObj(null)
+      setMessages((m) => [...m, { role: 'assistant', content: `已从材料拆解，生成 ${nodes.length} 个节点、${edges.length} 条连线。` }])
+      onStatus?.(`POP！已生成 ${nodes.length} 个节点`)
+      setShowImport(false); setImportText(''); setImportFileObj(null); setImportUrl('')
     } catch (e) {
       setImportErr(e.message || '导入拆解失败')
+      onStatus?.('没憋出来，再补点细节试试')
     } finally {
       setImportBusy(false)
     }
   }
 
+  // 收起态：浮动按钮
   if (collapsed) {
     return (
       <button className="ai-fab" onClick={() => setCollapsed(false)}>
-        🤖 AI
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.6-.8L3 21l1.9-5.7A8.38 8.38 0 0 1 4 11.5 8.5 8.5 0 0 1 12.5 3 8.38 8.38 0 0 1 21 11.5z"/></svg>
+        <span>AI</span>
       </button>
     )
   }
 
-  const rows = Math.min(Math.max(input.split('\n').length, 3), 8)
+  const displayMsgs = mode === 'node' && focus ? threads[focus.id] || [] : messages
 
-  const displayMsgs =
-    mode === 'node' && focus ? threads[focus.id] || [] : messages
+  // 是否使用外部输入（底栏模式）
+  const hasExternalInput = !!externalInput
 
   return (
-    <div className="ai-panel">
+    <div className="ai-panel" style={{ width: `${splitPct}%` }}>
+      {/* 面板头部 */}
       <div className="ai-head">
-        <span>🤖 AI 协同拆解</span>
-        <button className="ai-mini" onClick={() => setCollapsed(true)} title="收起">
-          —
-        </button>
+        <span>AI 聊天框</span>
+        {!settings.apiKey && <span className="demo-badge">演示模式 · 模拟数据</span>}
+        <button className="ai-mini" onClick={() => setCollapsed(true)} title="收起">—</button>
       </div>
 
+      {/* 下钻/选中提示条 */}
       {mode === 'node' && focus && (
-        <div className="ai-focus">
-          📌 正在下钻卡片：
-          <b>{focus.content?.slice(0, 30) || '（空卡片）'}</b>
-          <button className="ai-exit" onClick={exitDrill}>
-            返回
-          </button>
-        </div>
+        <div className="ai-focus">📌 正在下钻卡片：<b>{focus.data?.content?.slice(0, 30) || '（空卡片）'}</b><button className="ai-exit" onClick={exitDrill}>返回</button></div>
       )}
+      {mode === 'global' && selectedNodeIds.length > 0 && (() => {
+        const cards = allNodes.filter((n) => selectedNodeIds.includes(n.id))
+        return (
+          <div className="ai-context">
+            <span className="ctx-label">🟦 上下文 {cards.length} 张</span>
+            <div className="ctx-chips">
+              {cards.map((n) => (
+                <span className="ctx-chip" key={n.id}>
+                  <span className={`ctx-dot type-${n.data?.type || 'idea'}`} />
+                  <span className="ctx-name">{(n.data?.content || '（空卡片）').split('\n')[0].slice(0, 16) || '（空卡片）'}</span>
+                  <button className="ctx-drill" title="在此卡片下钻提问" onClick={() => drillCard(n.id)}>下钻</button>
+                  <button className="ctx-x" title="移出上下文" onClick={() => deselectNodes([n.id])}>×</button>
+                </span>
+              ))}
+            </div>
+            <button className="ctx-clear" onClick={clearSelection}>清空</button>
+          </div>
+        )
+      })()}
 
-      {mode === 'global' && selectedNode && (
-        <div className="ai-sel">
-          🟦 已选中卡片：
-          <b>{(selectedNode.data.content || '').slice(0, 24) || '（空卡片）'}</b>
-          <button className="ai-drill" onClick={enterDrill}>
-            在此卡片下钻提问
-          </button>
-        </div>
-      )}
-
+      {/* 消息列表 */}
       <div className="ai-msg-list" ref={scrollRef}>
         {displayMsgs.length === 0 && !busy && !error && (
-          <div className="ai-hint">
-            {mode === 'node'
-              ? '针对这张卡片继续提问；聊清楚后点「挂在此卡下拆解」，子节点会直接长在它下面。'
-              : '把想法丢进来，点「发送」和 AI 多轮讨论；聊清楚后「拆解落图」，节点会自动落到画布并横向展开。也可直接在画布点选卡片下钻。'}
+            <div className="ai-empty">
+            <div className="ai-empty-logo">LA</div>
+            <img className="ai-empty-mascot" src={import.meta.env.BASE_URL + 'walk-mascot.gif'} alt="LAPOP" />
+            <div className="ai-empty-hint">&gt; 准备就绪，等待你的灵感输入<span className="ai-wait-dots"><i/><i/><i/><i/></span></div>
           </div>
         )}
-        {displayMsgs.map((m, i) => (
-          <div key={i} className={`ai-msg ai-${m.role}`}>
-            {m.content}
+        {displayMsgs.map((m, i) => {
+          const isLast = i === displayMsgs.length - 1
+          const userRounds = displayMsgs.filter((x) => x.role === 'user').length
+          const showDecomposeHint = mode === 'global' && m.role === 'assistant' && isLast && userRounds >= 3
+          // AI 回答按空行拆成可拖拽段落；用户消息保持原样
+          const paras = m.role === 'assistant'
+            ? (m.content || '').split(/\n\n+/).map((s) => s.trim()).filter(Boolean)
+            : []
+          return (
+            <div key={i}>
+              <div className={`ai-msg ai-${m.role}`}>
+                {m.role === 'assistant'
+                  ? (paras.length ? paras.map((para, pi) => (
+                    <div className="ai-para" key={pi}>
+                      <span
+                        className="para-handle"
+                        title="按住拖到画布"
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.effectAllowed = 'copy'
+                          e.dataTransfer.setData('application/lapop-para', JSON.stringify({ text: para, type: 'resource' }))
+                        }}
+                      >⊕</span>
+                      <span className="ai-para-text">{para}</span>
+                    </div>
+                  )) : <div className="ai-msg-text">{m.content}</div>)
+                  : <div className="ai-msg-text">{m.content}</div>}
+                {/* 每条助手消息自带标签芯片（对齐原型：INSIGHT/DIR/STEP/IDEA） */}
+                {m.role === 'assistant' && m.tags && m.tags.length > 0 && (
+                  <div className="tag-chips">
+                    {m.tags.map((tag, ti) => (
+                      <button key={ti} className={`tag-chip type-${tag.type}`}
+                        title={`聚焦画布上同类节点: ${tag.label}`}
+                        onClick={() => focusTagType(tag.type)}>
+                        {tag.type.toUpperCase()}: {tag.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {/* 聊满 3 轮后，最后一条助手消息下方给出拆解引导（用户主动触发） */}
+                {showDecomposeHint && (
+                  <button className="decompose-hint" onClick={() => doDecompose(lastUserText())} disabled={busy}>
+                    👉 方向已明确？点此「拆解落图」生成图谱
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        })}
+        {busy && (
+          <div className="ai-loading">
+            <span className="loading-dot dot-pink" />
+            <span className="loading-dot dot-blue" />
+            <span className="loading-dot dot-yellow" />
+            <span className="loading-dot dot-green" />
           </div>
-        ))}
-        {busy && <div className="ai-msg ai-assistant">思考中…</div>}
+        )}
         {error && <div className="ai-error">{error}</div>}
       </div>
 
-      <div className="ai-input-row">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault()
-              send()
+      {/* 下钻模式：拆解按钮（外部输入模式下仍保留，挂到选中卡片下） */}
+      {mode === 'node' && focus && (
+        <div className="ai-drill-bar">
+          <button className="primary" onClick={doDecompose} disabled={busy}>挂在此卡下拆解</button>
+        </div>
+      )}
+
+      {/* ===== 外部输入模式下：不渲染内置输入区和操作按钮行 ===== */}
+      {!hasExternalInput && (
+        <>
+          <div className="ai-input-row">
+            <textarea value={input} onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+              placeholder={mode === 'node' ? '针对这张卡片继续提问…（Enter 发送，Shift+Enter 换行）' : '输入想法，或继续和 AI 讨论…（Enter 发送，Shift+Enter 换行）'}
+              rows={Math.min(Math.max(input.split('\n').length, 3), 8)}
+            />
+          </div>
+          <div className="ai-actions">
+            <button onClick={send} disabled={busy}>发送</button>
+            {mode === 'node'
+              ? <button className="primary" onClick={doDecompose} disabled={busy}>挂在此卡下拆解</button>
+              : <button className="primary" onClick={doDecompose} disabled={busy}>拆解落图</button>
             }
-          }}
-          placeholder={
-            mode === 'node'
-              ? '针对这张卡片继续提问…（Ctrl/⌘ + Enter 发送）'
-              : '输入想法，或继续和 AI 讨论…（Ctrl/⌘ + Enter 发送）'
-          }
-          rows={rows}
-        />
-      </div>
+            <button className="ghost" onClick={doOptimize} disabled={busy}>优化画布</button>
+            <button className="ghost" onClick={doRelate} disabled={busy}>自动关联</button>
+            <button className="ghost" onClick={doReport} disabled={reportBusy}>生成报告</button>
+            <button className="ghost" onClick={() => setShowImport(true)}>导入</button>
+            <button className="ghost" onClick={() => setShowSettings((v) => !v)}>设置</button>
+          </div>
+        </>
+      )}
 
-      <div className="ai-actions">
-        <button onClick={send} disabled={busy}>
-          发送
-        </button>
-        {mode === 'node' ? (
-          <button className="primary" onClick={doDecompose} disabled={busy}>
-            挂在此卡下拆解
-          </button>
-        ) : (
-          <button className="primary" onClick={doDecompose} disabled={busy}>
-            拆解落图
-          </button>
-        )}
-        <button className="ghost" onClick={doOptimize} disabled={busy}>
-          优化画布
-        </button>
-        <button className="ghost" onClick={doRelate} disabled={busy}>
-          自动关联
-        </button>
-        <button className="ghost" onClick={doReport} disabled={reportBusy}>
-          生成报告
-        </button>
-        <button className="ghost" onClick={() => setShowImport(true)}>
-          导入
-        </button>
-        <button className="ghost" onClick={() => setShowSettings((v) => !v)}>
-          设置
-        </button>
-      </div>
-
+      {/* 设置弹窗 */}
       {showSettings && (
         <div className="ai-settings">
-          <label>
-            API Key
+          <label>API Key
             <span className="key-row">
-              <input
-                type={showKey ? 'text' : 'password'}
-                value={settings.apiKey}
-                onChange={(e) => update({ apiKey: e.target.value })}
-                placeholder="sk-..."
-              />
-              <button
-                type="button"
-                className="key-toggle"
-                onClick={() => setShowKey((v) => !v)}
-                title={showKey ? '隐藏密钥' : '显示密钥'}
-              >
+              <input type={showKey ? 'text' : 'password'} value={settings.apiKey}
+                onChange={(e) => update({ apiKey: e.target.value })} placeholder="sk-..." />
+              <button type="button" className="key-toggle" onClick={() => setShowKey((v) => !v)}>
                 {showKey ? '隐藏' : '显示'}
               </button>
             </span>
           </label>
-          <label>
-            Base URL
-            <input
-              value={settings.baseURL}
-              onChange={(e) => update({ baseURL: e.target.value })}
-              placeholder="https://api.deepseek.com/v1"
-            />
+          <label>Base URL
+            <input value={settings.baseURL} onChange={(e) => update({ baseURL: e.target.value })} placeholder="https://api.deepseek.com" />
           </label>
-          <label>
-            模型
-            <input
-              value={settings.model}
-              onChange={(e) => update({ model: e.target.value })}
-              placeholder="deepseek-v4-pro"
-              list="model-options"
-            />
+          <label>模型
+            <input value={settings.model} onChange={(e) => update({ model: e.target.value })} placeholder="deepseek-v4-pro" list="model-options" />
           </label>
           <datalist id="model-options">
-            <option value="deepseek-v4-pro" />
-            <option value="deepseek-v4-flash" />
-            <option value="deepseek-chat" />
-            <option value="deepseek-reasoner" />
-            <option value="gpt-4o" />
-            <option value="gpt-4o-mini" />
-            <option value="claude-3-5-sonnet-20241022" />
-            <option value="qwen-max" />
+            <option value="deepseek-v4-pro" /><option value="deepseek-v4-flash" />
+            <option value="deepseek-chat" /><option value="deepseek-reasoner" />
+            <option value="gpt-4o" /><option value="gpt-4o-mini" />
+            <option value="claude-3-5-sonnet-20241022" /><option value="qwen-max" />
           </datalist>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={!!settings.resetOnStart}
+              onChange={(e) => update({ resetOnStart: e.target.checked })}
+            />
+            <span>启动即清空（演示模式）</span>
+          </label>
+
+          <fieldset className="settings-group">
+            <legend>联网搜索</legend>
+            <label>模式
+              <select value={settings.searchMode} onChange={(e) => update({ searchMode: e.target.value })}>
+                <option value="none">关闭（仅模型知识库）</option>
+                <option value="app">应用侧 · 搜索 API 注入（RAG）</option>
+                <option value="model">模型侧 · web_search 工具</option>
+              </select>
+            </label>
+            {settings.searchMode === 'app' && (
+              <>
+                <label>搜索服务
+                  <select value={settings.searchProvider} onChange={(e) => update({ searchProvider: e.target.value })}>
+                    <option value="tavily">Tavily</option>
+                    <option value="serpapi">SerpAPI</option>
+                    <option value="bing">Bing</option>
+                  </select>
+                </label>
+                <label>搜索 API Key
+                  <span className="key-row">
+                    <input type={showKey ? 'text' : 'password'} value={settings.searchApiKey || ''}
+                      onChange={(e) => update({ searchApiKey: e.target.value })} placeholder="搜索服务 Key" />
+                    <button type="button" className="key-toggle" onClick={() => setShowKey((v) => !v)}>
+                      {showKey ? '隐藏' : '显示'}
+                    </button>
+                  </span>
+                </label>
+              </>
+            )}
+            {settings.searchMode === 'model' && (
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!settings.modelWebSearch}
+                  onChange={(e) => update({ modelWebSearch: e.target.checked })}
+                />
+                <span>启用 web_search 工具（需模型厂商支持，如 OpenAI o 系列；由厂商执行搜索，无需搜索 Key）</span>
+              </label>
+            )}
+            <div className="ai-settings-tip">
+              应用侧：填入搜索服务 Key，AI 回答前先联网取资料注入上下文（受 CORS 限制，Tavily / SerpAPI 通常可直接用）。
+              模型侧：由模型厂商代发搜索，无需搜索 Key，但 DeepSeek 等多数模型不支持此工具。
+            </div>
+          </fieldset>
+
           <div className="ai-settings-tip">
-            默认 DeepSeek（OpenAI 兼容）。DeepSeek 官方模型请填
-            <code>deepseek-v4-pro</code> 或 <code>deepseek-v4-flash</code>
-            ；旧版 <code>deepseek-chat</code> / <code>deepseek-reasoner</code>
-            将于 2026/07/24 弃用。Base URL 可用
-            <code>https://api.deepseek.com</code> 或
-            <code>https://api.deepseek.com/v1</code>。Key 仅存本机，应用直连厂商。
+            默认 DeepSeek（OpenAI 兼容）。DeepSeek 官方模型请填 <code>deepseek-v4-pro</code> 或 <code>deepseek-v4-flash</code>；
+            旧版 <code>deepseek-chat</code> / <code>deepseek-reasoner</code> 将于 2026/07/24 弃用。
+            Base URL 默认 <code>https://api.deepseek.com</code>（无需加 /v1）。
+            Key 仅存本机，应用直连厂商。
+          </div>
+          <div className="settings-clear">
+            {!clearConfirm ? (
+              <button className="tb-danger" onClick={() => setClearConfirm(true)}>清空画布</button>
+            ) : (
+              <div className="clear-confirm">
+                <span>确认清空全部节点与连线？</span>
+                <div className="confirm-actions">
+                  <button className="danger" onClick={() => { useStore.getState().clear(); setClearConfirm(false) }}>确认清空</button>
+                  <button onClick={() => setClearConfirm(false)}>取消</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
+      {/* 报告弹窗 */}
       {report && (
         <div className="modal-mask" onClick={() => setReport(null)}>
           <div className="report-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="report-head">
-              <span>📄 画布报告</span>
-              <div className="report-actions">
-                <button onClick={() => navigator.clipboard?.writeText(report)}>
-                  复制
-                </button>
-                <button onClick={downloadReport}>下载 .md</button>
-                <button className="report-close" onClick={() => setReport(null)}>
-                  关闭
-                </button>
-              </div>
-            </div>
+            <div className="report-head"><span>📄 画布报告</span><div className="report-actions">
+              <button onClick={() => navigator.clipboard?.writeText(report)}>复制</button>
+              <button onClick={downloadReport}>下载 .md</button>
+              <button className="report-close" onClick={() => setReport(null)}>关闭</button>
+            </div></div>
             <pre className="report-body">{report}</pre>
           </div>
         </div>
       )}
 
+      {/* 导入弹窗 */}
       {showImport && (
         <div className="modal-mask" onClick={() => setShowImport(false)}>
           <div className="import-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="import-head">
-              <span>📥 导入材料 → 拆解成图谱</span>
-              <button className="report-close" onClick={() => setShowImport(false)}>
-                ×
-              </button>
-            </div>
+            <div className="import-head"><span>📥 导入材料 → 拆解成图谱</span><button className="report-close" onClick={() => setShowImport(false)}>×</button></div>
             <div className="import-tip">
               把想法 / 文章 / 笔记，或其他 AI（ChatGPT、Claude、DeepSeek、豆包等）的聊天记录导出粘贴进来；
-              也支持上传 <b>.md / .txt / .docx / .pdf</b> 文件。AI 会把它提炼成「想法 → 方向 → 步骤 / 资料 / 洞察」的节点树落到画布。
+              也支持上传 <b>.md / .txt / .docx / .pdf</b> 文件，或粘贴一个<b>可访问的分享链接</b>。AI 会把它提炼成「想法 → 方向 → 步骤 / 资料 / 洞察」的节点树落到画布。
             </div>
-            <textarea
-              className="import-text"
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-              placeholder="把要拆解的材料粘贴到这里（也可上传文件，二选一或都填；文件优先）"
-              rows={8}
-            />
+            <label className="import-url-row">
+              分享链接（可选，尽力抓取；跨域可能被拦截则请复制文本）
+              <input className="import-url-input" value={importUrl} onChange={(e) => setImportUrl(e.target.value)}
+                placeholder="https://chatgpt.com/share/... 或 https://claude.ai/..." />
+            </label>
+            <textarea className="import-text" value={importText} onChange={(e) => setImportText(e.target.value)}
+              placeholder="把要拆解的材料粘贴到这里（也可上传文件，二选一或都填；文件优先）" rows={8} />
             <div className="import-file-row">
-              <label className="import-file-btn">
-                选择文件（.md / .txt / .docx / .pdf）
-                <input
-                  type="file"
-                  accept=".md,.markdown,.txt,.text,.json,.docx,.pdf"
-                  style={{ display: 'none' }}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0]
-                    setImportFileObj(f || null)
-                    setImportErr('')
-                  }}
-                />
+              <label className="import-file-btn">选择文件（.md / .txt / .docx / .pdf）
+                <input type="file" accept=".md,.markdown,.txt,.text,.json,.docx,.pdf" style={{ display: 'none' }}
+                  onChange={(e) => { const f = e.target.files?.[0]; setImportFileObj(f || null); setImportErr('') }} />
               </label>
-              {importFileObj && (
-                <span className="import-file-name">{importFileObj.name}</span>
-              )}
+              {importFileObj && <span className="import-file-name">{importFileObj.name}</span>}
             </div>
             {importErr && <div className="ai-error">{importErr}</div>}
             <div className="confirm-actions">
-              <button
-                className="primary"
-                onClick={doImport}
-                disabled={importBusy}
-              >
-                {importBusy ? '拆解中…' : '拆解成图谱'}
-              </button>
-              <button
-                onClick={() => {
-                  setShowImport(false)
-                  setImportText('')
-                  setImportFileObj(null)
-                  setImportErr('')
-                }}
-              >
-                取消
-              </button>
+              <button className="primary" onClick={doImport} disabled={importBusy}>{importBusy ? '拆解中…' : '拆解成图谱'}</button>
+              <button onClick={() => { setShowImport(false); setImportText(''); setImportFileObj(null); setImportUrl(''); setImportErr('') }}>取消</button>
             </div>
           </div>
         </div>
       )}
     </div>
   )
-}
+})
+
+export default AIPanel

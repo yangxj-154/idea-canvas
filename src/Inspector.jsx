@@ -23,7 +23,7 @@ export default function Inspector({
 
   // 跨想法关联：两端属于不同想法根
   const crossEdges = edges
-    .filter((e) => rootOf[e.source] !== rootOf[e.target])
+    .filter((e) => rootOf.get(e.source) !== rootOf.get(e.target))
     .map((e) => ({
       source: e.source,
       target: e.target,
@@ -95,7 +95,7 @@ export default function Inspector({
               <div
                 key={i}
                 className="rel-row"
-                onClick={() => onFocus(membersOf[rid] || [rid])}
+                onClick={() => onFocus(membersOf.get(rid) || [rid])}
                 title="点击聚焦该想法及其全部子节点"
               >
                 <div className="rel-line">
@@ -107,7 +107,7 @@ export default function Inspector({
                 </div>
                 <div className="rel-meta">
                   <span className="rel-reason">
-                    {membersOf[rid]?.length || 1} 个节点
+                    {membersOf.get(rid)?.length || 1} 个节点
                   </span>
                 </div>
               </div>

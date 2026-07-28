@@ -145,6 +145,14 @@ export const useStore = create((set, get) => ({
       nodes: typeof updater === 'function' ? updater(state.nodes) : updater,
     })),
 
+  // 批量更新连线（用于「备份/恢复」替换或合并边）
+  setEdges: (updater) =>
+    set((state) => ({
+      past: [...state.past, { nodes: state.nodes, edges: state.edges }].slice(-HISTORY_LIMIT),
+      future: [],
+      edges: typeof updater === 'function' ? updater(state.edges) : updater,
+    })),
+
   addNodesAndEdges: (newNodes, newEdges) =>
     set((state) => ({
       past: [...state.past, { nodes: state.nodes, edges: state.edges }].slice(-HISTORY_LIMIT),
@@ -205,7 +213,15 @@ export const useStore = create((set, get) => ({
   load: async () => {
     const saved = await get(STORAGE_KEY)
     const nodes = saved && saved.nodes ? saved.nodes : []
-    const edges = saved && saved.edges ? saved.edges : []
+    const rawEdges = saved && saved.edges ? saved.edges : []
+    // 横向布局归一化：旧数据可能存 top/bottom 连接点，删除该 handle 后归一成 null，
+    // 由 React Flow 自动选择最近的 left/right 连接点，连线随之走左右。
+    const VALID = new Set(['left', 'right'])
+    const edges = rawEdges.map((e) => ({
+      ...e,
+      sourceHandle: VALID.has(e.sourceHandle) ? e.sourceHandle : null,
+      targetHandle: VALID.has(e.targetHandle) ? e.targetHandle : null,
+    }))
     set({ nodes, edges })
   },
 }))

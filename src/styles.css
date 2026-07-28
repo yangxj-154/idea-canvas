@@ -237,20 +237,6 @@ input, textarea, select { font-family: inherit; }
   from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
-/* 设置面板：联网搜索分组 */
-.settings-group {
-  border: var(--border-thick) solid var(--black);
-  border-radius: 10px;
-  padding: 6px 12px 12px;
-  margin: 10px 0 2px;
-}
-.settings-group legend {
-  font-weight: 800;
-  font-size: 11px;
-  padding: 0 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
 
 .export-wrap { position: relative; display: inline-block; }
 .export-menu {
@@ -259,9 +245,9 @@ input, textarea, select { font-family: inherit; }
   right: 0;
   z-index: 40;
   background: var(--white);
-  border: var(--border-thick) solid var(--black);
-  border-radius: var(--radius);
-  box-shadow: 4px 4px 0 var(--hotpink);
+  border: 3px solid var(--black);
+  border-radius: var(--radius-lg);
+  box-shadow: 6px 6px 0 rgba(0,0,0,0.25);
   display: flex;
   flex-direction: column;
   min-width: 220px;
@@ -1013,46 +999,36 @@ input, textarea, select { font-family: inherit; }
   box-shadow: none !important;
 }
 
-/* 设置面板 */
-.ai-settings {
-  padding: 12px 14px;
-  border-top: var(--border-thick) solid var(--white);
-  background: var(--black);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+/* 设置面板（复用备份向导视觉语言：白底分区方框） */
+.settings-label {
+  font-size: 12px; font-weight: 700; color: var(--black);
+  display: flex; flex-direction: column; gap: 4px;
 }
-.ai-settings label {
-  font-size: 12px;
-  color: var(--gray-light);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-weight: 700;
+.settings-label input, .settings-label select {
+  border: var(--border-thick) solid var(--black);
+  border-radius: var(--radius); padding: 7px 10px;
+  font-size: 13px; background: var(--white); color: var(--black);
+  outline: none; width: 100%;
 }
-.ai-settings input, .ai-settings select {
-  border: var(--border-thick) solid var(--gray-light);
-  background: var(--charcoal);
-  color: var(--white);
-  border-radius: var(--radius);
-  padding: 7px 10px;
-  font-size: 13px;
-  outline: none;
+.settings-label input:focus, .settings-label select:focus { border-color: var(--hotpink); }
+.settings-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; color: var(--black);
 }
-.ai-settings input:focus, .ai-settings select:focus {
-  border-color: var(--hotpink);
+.key-row { display: flex; gap: 6px; flex: 1 1 auto; max-width: 320px; }
+.key-row input { flex: 1; }
+.key-toggle {
+  border: var(--border-thick) solid var(--black); background: var(--white); color: var(--black);
+  border-radius: var(--radius); padding: 0 10px; font-size: 12px; font-weight: 700;
+  cursor: pointer; white-space: nowrap;
 }
-.ai-settings-tip {
-  font-size: 11px;
-  color: var(--gray-light);
-  line-height: 1.5;
-}
+.key-toggle:hover { background: var(--hotpink); color: var(--white); }
+.settings-tip { font-size: 12px; color: #666; line-height: 1.5; }
+.ai-settings-tip { font-size: 12px; color: #666; line-height: 1.5; }
 .settings-clear {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1.5px dashed var(--gray-light);
-  display: flex;
-  justify-content: flex-end;
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1.5px dashed rgba(0,0,0,0.2);
+  display: flex; justify-content: flex-end;
 }
 
 /* FAB 浮动按钮（移动端） */
@@ -1599,6 +1575,8 @@ input, textarea, select { font-family: inherit; }
 .react-flow .react-flow__edge-path {
   stroke: var(--black);
   stroke-width: 2;
+  /* 缩放时连线保持 2px 可见；同时避免导出 PNG fit 全图缩放后连线退化为亚像素而不可见 */
+  vector-effect: non-scaling-stroke;
 }
 .react-flow__edge:hover .react-flow__edge-path {
   stroke: var(--hotpink);
@@ -2294,30 +2272,16 @@ input, textarea, select { font-family: inherit; }
   margin-bottom: 14px;
 }
 
-/* ========== 导入弹窗 ========== */
+/* ========== 导入弹窗（复用备份向导视觉语言） ========== */
 .import-modal {
   width: 560px;
   max-width: 92vw;
   max-height: 86vh;
-  background: var(--white);
-  border: var(--border-thick) solid var(--black);
-  border-radius: var(--radius-lg);
-  padding: 20px 22px;
   display: flex;
   flex-direction: column;
-  box-shadow: 6px 6px 0 rgba(0,0,0,0.5);
   overflow: auto;
 }
-.import-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 900;
-  font-size: 16px;
-  color: var(--black);
-  font-family: var(--font-display);
-  margin-bottom: 12px;
-}
+.import-modal .backup-body { gap: 14px; }
 .import-tip {
   font-size: 12px;
   color: rgba(0,0,0,0.5);
@@ -2352,9 +2316,9 @@ input, textarea, select { font-family: inherit; }
   margin: 12px 0;
 }
 .import-file-btn {
-  border: var(--border-thick) solid var(--blue);
-  color: var(--blue);
-  background: rgba(42,77,255,0.08);
+  border: var(--border-thick) solid var(--black);
+  color: var(--black);
+  background: var(--white);
   border-radius: var(--radius);
   padding: 7px 14px;
   font-size: 12.5px;
@@ -2362,7 +2326,7 @@ input, textarea, select { font-family: inherit; }
   cursor: pointer;
 }
 .import-file-btn:hover {
-  background: var(--blue);
+  background: var(--hotpink);
   color: var(--white);
 }
 .import-file-name {
@@ -2776,4 +2740,84 @@ input, textarea, select { font-family: inherit; }
 /* 优化画布排版时的 600ms 平滑过渡（reduced-motion 用户已在上方被全局降级，不会触发） */
 .react-flow.layouting .react-flow__node {
   transition: transform 600ms ease;
+}
+
+/* ===== 节点搜索（画布内：缩略图左侧，全屏时也可直接搜） ===== */
+.canvas-search { position: absolute; bottom: 15px; right: 232px; z-index: 10; }
+.search-input {
+  height: 34px; width: 200px; padding: 0 12px;
+  border: 2px solid var(--black); border-radius: 6px;
+  background: #fff; font-size: 13px; outline: none;
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.15);
+}
+.search-input:focus { box-shadow: 3px 3px 0 var(--hotpink); }
+.search-drop {
+  position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; z-index: 50;
+  background: #fff; border: 2px solid var(--black); border-radius: 6px;
+  max-height: 320px; overflow-y: auto; box-shadow: 4px 4px 0 rgba(0,0,0,0.15);
+}
+.search-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 10px; border: none; background: #fff; cursor: pointer;
+  text-align: left; font-size: 13px; border-bottom: 1px solid #eee;
+}
+.search-item:hover, .search-item.active { background: var(--cream); }
+.search-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+.search-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-empty { padding: 10px; font-size: 13px; color: #888; }
+
+/* ===== 图谱总览弹窗 ===== */
+.graph-modal {
+  width: 92vw; height: 86vh; background: #fff;
+  border: 3px solid var(--black); border-radius: 12px;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 8px 8px 0 rgba(0,0,0,0.25);
+}
+.graph-head, .backup-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 2px solid var(--black);
+  font-weight: 700; font-size: 15px;
+}
+.graph-body { flex: 1 1 auto; min-height: 0; }
+
+/* ===== 备份 / 恢复向导 ===== */
+.backup-modal {
+  width: 560px; max-width: 92vw; max-height: 88vh; overflow-y: auto;
+  background: #fff; border: 3px solid var(--black); border-radius: 12px;
+  display: flex; flex-direction: column;
+  box-shadow: 8px 8px 0 rgba(0,0,0,0.25);
+}
+.backup-body { padding: 16px; display: flex; flex-direction: column; gap: 18px; }
+.backup-sec {
+  border: 2px solid var(--black); border-radius: 8px; padding: 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.backup-sec-title { font-weight: 700; font-size: 14px; }
+.backup-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.backup-row select, .backup-row input {
+  flex: 1 1 auto; max-width: 320px; height: 32px; padding: 0 8px;
+  border: 2px solid var(--black); border-radius: 6px; font-size: 13px;
+}
+.backup-tip { font-size: 12px; color: #666; line-height: 1.5; }
+.backup-err { font-size: 12px; color: #c0392b; }
+.backup-btn {
+  align-self: flex-start; padding: 8px 18px; border: 2px solid var(--black);
+  border-radius: 6px; background: var(--hotpink); color: #fff;
+  font-weight: 700; cursor: pointer;
+}
+.backup-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 设置弹窗内备份区与危险区分隔 */
+.backup-divider { height: 1px; background: rgba(0,0,0,0.12); margin: 4px 0; }
+.backup-sec.danger-zone { border-color: var(--hotpink); }
+.backup-sec.danger-zone .backup-sec-title { color: var(--hotpink); }
+/* 导入弹窗内 tip 不再额外留底，避免与 backup-body 的 gap 重复 */
+.import-modal .import-tip { margin-bottom: 0; }
+
+/* 窄屏：搜索框收窄并移到左下角（避开右下角缩略图），图谱/备份弹窗自适应 */
+@media (max-width: 768px) {
+  .search-input { width: 130px; }
+  .canvas-search { right: auto; left: 12px; bottom: 12px; }
+  .graph-modal { width: 96vw; height: 80vh; }
+  .backup-modal { width: 96vw; }
 }

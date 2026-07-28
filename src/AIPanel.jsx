@@ -6,6 +6,7 @@ import dagre from 'dagre'
 import { useStore } from './store'
 import { NODE_TYPES } from './nodeTypes'
 import { loadSettings, saveSettings, loadChat, saveChat } from './settings'
+import { collectAppState, downloadJSON, encryptJSON, decryptJSON, applyAppState } from './backup'
 import { DEFAULT_SETTINGS, discuss, decompose, optimizeCanvas, autoRelate, generateReport, decomposeImport } from './ai'
 import { treeToGraph } from './treeLayout'
 import { buildLearningSummary } from './corrections'
@@ -35,6 +36,14 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [showSettings, setShowSettings] = useState(false)
+  // 备份/恢复向导状态（已并入「设置」弹窗）
+  const [backupScope, setBackupScope] = useState('canvas')
+  const [backupEncrypt, setBackupEncrypt] = useState(false)
+  const [backupPass, setBackupPass] = useState('')
+  const [importParsed, setImportParsed] = useState(null)
+  const [importEncPass, setImportEncPass] = useState('')
+  const [importMode, setImportMode] = useState('merge')
+  const [importError, setImportError] = useState(null)
   const collapsed = useStore((s) => s.collapsed)
   const setCollapsed = useStore((s) => s.setCollapsed)
   const [showKey, setShowKey] = useState(false)
@@ -419,12 +428,12 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
 
     const NODE_W = 210
     const NODE_H = 96
-    const H_GAP = 280   // 同层水平间距（中心距）
-    const V_GAP = 220   // 层间垂直间距（中心距）
-    const TREE_GAP = 300 // 多棵树之间的水平间距
-    const ORPHAN_GAP = 300 // 孤立区与树区的垂直间距
-    const COLS = 6      // 孤立节点每行最多 6 个
-    const TOP_Y = 120   // 根节点行 y 起点
+    const H_GAP = 240   // 层级间水平间距（中心距）：比节点宽略大，节点间留约 30px 缝隙，紧凑
+    const V_GAP = 130   // 同层垂直间距（中心距）：卡片间留约 34px 缝隙
+    const TREE_GAP = 180 // 多棵树之间的垂直间距（LR 下纵向分列）
+    const ORPHAN_GAP = 180 // 孤立区与树区的水平间距
+    const COLS = 6      // 孤立节点每列最多 6 个（纵向排列）
+    const LEFT_X = 120  // 根节点列 x 起点（左侧）
 
     const sizeOf = (n) => ({
       w: n.measured?.width || n.width || NODE_W,
@@ -434,22 +443,21 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
     const connected = new Set()
     edges.forEach((e) => { connected.add(e.source); connected.add(e.target) })
 
-    // 根节点 = 无入边；多个根按"原有 position.x"从小到大排序，从左到右占独立区域
-    const origX = new Map(nodes.map((n) => [n.id, n.position?.x ?? 0]))
+    // 根节点 = 无入边；多根在 LR 下按"原有 position.y"纵向分列（从上到下），每棵占独立垂直区域
     let roots = nodes.filter((n) => !inEdge.has(n.id))
     if (!roots.length && nodes.length) roots = [nodes[0]]
-    roots.sort((a, b) => (origX.get(a.id) ?? 0) - (origX.get(b.id) ?? 0))
 
     // 孤立节点 = 没有任何连线的节点
     const isolated = nodes.filter((n) => !connected.has(n.id))
     const isolatedSet = new Set(isolated.map((n) => n.id))
 
-    // 1) dagre 计算分层坐标（TB：上 → 下）
+    // 1) dagre 计算分层坐标（LR：左 → 右，符合横向浏览习惯）
+    //    LR 下 ranksep = 层级间水平间距，nodesep = 同层节点垂直间距
     const g = new dagre.graphlib.Graph()
     g.setGraph({
-      rankdir: 'TB',
-      nodesep: Math.max(20, H_GAP - NODE_W),
-      ranksep: Math.max(20, V_GAP - NODE_H),
+      rankdir: 'LR',
+      nodesep: Math.max(20, V_GAP - NODE_H), // 同层（垂直方向）节点间距：V_GAP(130)-NODE_H(96)=34
+      ranksep: Math.max(20, H_GAP - NODE_W), // 层间（水平方向）节点间距：H_GAP(240)-NODE_W(210)=30
       marginx: 20,
       marginy: 20,
     })
@@ -473,7 +481,10 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
       pos.set(n.id, { x: dn.x - s.w / 2, y: dn.y - s.h / 2 })
     })
 
-    // 2) 按根重组：每个子树平移到独立区域，从左到右
+    // 2) 按根重组：LR 下多棵树纵向分列（从上到下），每棵占独立垂直区域
+    //    根按"原有 position.y"从小到大排序（从上到下）
+    const origY = new Map(nodes.map((n) => [n.id, n.position?.y ?? 0]))
+    roots.sort((a, b) => (origY.get(a.id) ?? 0) - (origY.get(b.id) ?? 0))
     const childMap = new Map()
     edges.forEach((e) => {
       if (!childMap.has(e.source)) childMap.set(e.source, [])
@@ -491,43 +502,44 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
     }
     const groups = roots.map((r) => {
       const ids = subtreeIds(r.id)
-      const xs = ids.map((id) => pos.get(id).x)
-      const minX = Math.min(...xs)
-      const maxX = Math.max(...xs)
-      return { ids, minX, maxX, w: maxX - minX }
+      const ys = ids.map((id) => pos.get(id).y)
+      const minY = Math.min(...ys)
+      const maxY = Math.max(...ys)
+      return { ids, minY, maxY, h: maxY - minY }
     })
     let cursor = 0
     groups.forEach((grp) => {
-      const shift = cursor - grp.minX
-      grp.ids.forEach((id) => { const p = pos.get(id); p.x += shift })
-      cursor += grp.w + TREE_GAP
+      const shift = cursor - grp.minY
+      grp.ids.forEach((id) => { const p = pos.get(id); p.y += shift })
+      cursor += grp.h + TREE_GAP
     })
 
-    // 3) 整片森林：根行对齐到 TOP_Y，水平居中于视口宽度 / 2
+    // 3) 整片森林：根列对齐到左侧（LEFT_X），垂直居中于视口高度 / 2
     const rfEl = (typeof document !== 'undefined') ? document.querySelector('.react-flow') : null
     const vw = rfEl ? rfEl.clientWidth : (typeof window !== 'undefined' ? window.innerWidth : 1280)
-    const xsAll = nodes.map((n) => pos.get(n.id).x)
-    const centerX = (Math.min(...xsAll) + Math.max(...xsAll)) / 2
-    const minY = Math.min(...nodes.map((n) => pos.get(n.id).y))
-    const dx = vw / 2 - centerX
-    const dy = TOP_Y - minY
+    const vh = rfEl ? rfEl.clientHeight : (typeof window !== 'undefined' ? window.innerHeight : 800)
+    const ysAll = nodes.map((n) => pos.get(n.id).y)
+    const centerY = (Math.min(...ysAll) + Math.max(...ysAll)) / 2
+    const minX = Math.min(...nodes.map((n) => pos.get(n.id).x))
+    const dx = LEFT_X - minX
+    const dy = vh / 2 - centerY
     nodes.forEach((n) => { const p = pos.get(n.id); p.x += dx; p.y += dy })
 
-    // 4) 孤立节点放最底部网格（每行最多 COLS 个，与树区保持 ORPHAN_GAP）
+    // 4) 孤立节点放最右侧网格（每列最多 COLS 个，纵向排列，与树区保持 ORPHAN_GAP 水平间距）
     if (isolated.length) {
-      const treeMaxY = Math.max(0, ...nodes.filter((n) => !isolatedSet.has(n.id)).map((n) => {
+      const treeMaxX = Math.max(0, ...nodes.filter((n) => !isolatedSet.has(n.id)).map((n) => {
         const p = pos.get(n.id)
         const s = measured.get(n.id)
-        return p.y + s.h
+        return p.x + s.w
       }))
-      const startY = treeMaxY + ORPHAN_GAP
-      const cellW = NODE_W + H_GAP
-      const cellH = NODE_H + V_GAP
-      const gridW = COLS * cellW
-      const startX = vw / 2 - gridW / 2 + H_GAP / 2
+      const startX = treeMaxX + ORPHAN_GAP
+      const cellW = NODE_W + H_GAP // 列间水平间距
+      const cellH = NODE_H + V_GAP // 同列垂直间距
+      const gridH = COLS * cellH
+      const startY = vh / 2 - gridH / 2
       isolated.forEach((n, i) => {
-        const col = i % COLS
-        const row = Math.floor(i / COLS)
+        const col = Math.floor(i / COLS)
+        const row = i % COLS
         pos.set(n.id, { x: startX + col * cellW, y: startY + row * cellH })
       })
     }
@@ -680,6 +692,70 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
     }
   }
 
+  // ===== 备份 / 恢复（已并入「设置」弹窗）=====
+  const handleExportBackup = async () => {
+    try {
+      let payload
+      if (backupScope === 'app') {
+        payload = await collectAppState()
+      } else {
+        const st = useStore.getState()
+        payload = {
+          app: 'LAPOP', kind: 'canvas', version: 1,
+          exportedAt: new Date().toISOString(),
+          canvas: { nodes: st.nodes, edges: st.edges },
+        }
+      }
+      if (backupEncrypt) {
+        if (!backupPass) { onStatus?.('请先输入加密口令'); return }
+        payload = await encryptJSON(payload, backupPass)
+      }
+      const stamp = new Date().toISOString().slice(0, 10)
+      downloadJSON(payload, `lapop-${backupScope}-${stamp}.json`)
+      onStatus?.('已导出备份文件')
+    } catch (e) {
+      onStatus?.('导出失败：' + (e.message || '未知错误'))
+    }
+  }
+
+  const handleImportFile = (e) => {
+    const f = e.target.files && e.target.files[0]
+    if (!f) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result))
+        setImportParsed(parsed)
+        setImportError(null)
+      } catch (err) {
+        setImportParsed(null)
+        setImportError('文件不是合法 JSON')
+      }
+    }
+    reader.onerror = () => setImportError('读取文件失败')
+    reader.readAsText(f)
+    e.target.value = ''
+  }
+
+  const handleRestore = async () => {
+    try {
+      if (!importParsed) { setImportError('请先选择备份文件'); return }
+      let parsed = importParsed
+      if (parsed.encrypted) {
+        if (!importEncPass) { setImportError('请输入解密口令'); return }
+        parsed = await decryptJSON(parsed, importEncPass)
+      }
+      const canvas = parsed.canvas || (parsed.nodes ? parsed : null)
+      if (!canvas) { setImportError('备份文件不含画布数据'); return }
+      await applyAppState(parsed, importMode, useStore.getState())
+      onStatus?.('恢复完成')
+      setShowSettings(false)
+      setTimeout(() => fitView({ duration: 400 }), 120)
+    } catch (e) {
+      setImportError('恢复失败：' + (e.message || '口令错误或文件损坏'))
+    }
+  }
+
   // 收起态：浮动按钮
   if (collapsed) {
     return (
@@ -829,102 +905,143 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
         </>
       )}
 
-      {/* 设置弹窗 */}
+      {/* 设置弹窗（含备份与恢复，复用备份向导视觉语言） */}
       {showSettings && (
-        <div className="ai-settings">
-          <label>API Key
-            <span className="key-row">
-              <input type={showKey ? 'text' : 'password'} value={settings.apiKey}
-                onChange={(e) => update({ apiKey: e.target.value })} placeholder="sk-..." />
-              <button type="button" className="key-toggle" onClick={() => setShowKey((v) => !v)}>
-                {showKey ? '隐藏' : '显示'}
-              </button>
-            </span>
-          </label>
-          <label>Base URL
-            <input value={settings.baseURL} onChange={(e) => update({ baseURL: e.target.value })} placeholder="https://api.deepseek.com" />
-          </label>
-          <label>模型
-            <input value={settings.model} onChange={(e) => update({ model: e.target.value })} placeholder="deepseek-v4-pro" list="model-options" />
-          </label>
-          <datalist id="model-options">
-            <option value="deepseek-v4-pro" /><option value="deepseek-v4-flash" />
-            <option value="deepseek-chat" /><option value="deepseek-reasoner" />
-            <option value="gpt-4o" /><option value="gpt-4o-mini" />
-            <option value="claude-3-5-sonnet-20241022" /><option value="qwen-max" />
-          </datalist>
-          <label className="settings-toggle">
-            <input
-              type="checkbox"
-              checked={!!settings.resetOnStart}
-              onChange={(e) => update({ resetOnStart: e.target.checked })}
-            />
-            <span>启动即清空（演示模式）</span>
-          </label>
-
-          <fieldset className="settings-group">
-            <legend>联网搜索</legend>
-            <label>模式
-              <select value={settings.searchMode} onChange={(e) => update({ searchMode: e.target.value })}>
-                <option value="none">关闭（仅模型知识库）</option>
-                <option value="app">应用侧 · 搜索 API 注入（RAG）</option>
-                <option value="model">模型侧 · web_search 工具</option>
-              </select>
-            </label>
-            {settings.searchMode === 'app' && (
-              <>
-                <label>搜索服务
-                  <select value={settings.searchProvider} onChange={(e) => update({ searchProvider: e.target.value })}>
-                    <option value="tavily">Tavily</option>
-                    <option value="serpapi">SerpAPI</option>
-                    <option value="bing">Bing</option>
-                  </select>
-                </label>
-                <label>搜索 API Key
+        <div className="modal-mask" onClick={() => setShowSettings(false)}>
+          <div className="backup-modal settings-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="设置">
+            <div className="backup-head">
+              <span>⚙ 设置</span>
+              <button className="report-close" onClick={() => setShowSettings(false)}>关闭</button>
+            </div>
+            <div className="backup-body">
+              {/* AI 配置 */}
+              <div className="backup-sec">
+                <div className="backup-sec-title">AI 配置</div>
+                <label className="backup-row"><span>API Key</span>
                   <span className="key-row">
-                    <input type={showKey ? 'text' : 'password'} value={settings.searchApiKey || ''}
-                      onChange={(e) => update({ searchApiKey: e.target.value })} placeholder="搜索服务 Key" />
+                    <input type={showKey ? 'text' : 'password'} value={settings.apiKey}
+                      onChange={(e) => update({ apiKey: e.target.value })} placeholder="sk-..." />
                     <button type="button" className="key-toggle" onClick={() => setShowKey((v) => !v)}>
                       {showKey ? '隐藏' : '显示'}
                     </button>
                   </span>
                 </label>
-              </>
-            )}
-            {settings.searchMode === 'model' && (
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={!!settings.modelWebSearch}
-                  onChange={(e) => update({ modelWebSearch: e.target.checked })}
-                />
-                <span>启用 web_search 工具（需模型厂商支持，如 OpenAI o 系列；由厂商执行搜索，无需搜索 Key）</span>
-              </label>
-            )}
-            <div className="ai-settings-tip">
-              应用侧：填入搜索服务 Key，AI 回答前先联网取资料注入上下文（受 CORS 限制，Tavily / SerpAPI 通常可直接用）。
-              模型侧：由模型厂商代发搜索，无需搜索 Key，但 DeepSeek 等多数模型不支持此工具。
-            </div>
-          </fieldset>
-
-          <div className="ai-settings-tip">
-            默认 DeepSeek（OpenAI 兼容）。DeepSeek 官方模型请填 <code>deepseek-v4-pro</code> 或 <code>deepseek-v4-flash</code>；
-            旧版 <code>deepseek-chat</code> / <code>deepseek-reasoner</code> 将于 2026/07/24 弃用。
-            Base URL 默认 <code>https://api.deepseek.com</code>（无需加 /v1）。
-            Key 仅存本机，应用直连厂商。
-          </div>
-          <div className="settings-clear">
-            {!clearConfirm ? (
-              <button className="tb-danger" onClick={() => setClearConfirm(true)}>清空画布</button>
-            ) : (
-              <div className="clear-confirm">
-                <span>确认清空全部节点与连线？</span>
-                <div className="confirm-actions">
-                  <button className="danger" onClick={() => { useStore.getState().clear(); setClearConfirm(false) }}>确认清空</button>
-                  <button onClick={() => setClearConfirm(false)}>取消</button>
+                <label className="backup-row"><span>Base URL</span>
+                  <input value={settings.baseURL} onChange={(e) => update({ baseURL: e.target.value })} placeholder="https://api.deepseek.com" />
+                </label>
+                <label className="backup-row"><span>模型</span>
+                  <input value={settings.model} onChange={(e) => update({ model: e.target.value })} placeholder="deepseek-v4-pro" list="model-options" />
+                </label>
+                <datalist id="model-options">
+                  <option value="deepseek-v4-pro" /><option value="deepseek-v4-flash" />
+                  <option value="deepseek-chat" /><option value="deepseek-reasoner" />
+                  <option value="gpt-4o" /><option value="gpt-4o-mini" />
+                  <option value="claude-3-5-sonnet-20241022" /><option value="qwen-max" />
+                </datalist>
+                <label className="settings-toggle">
+                  <input type="checkbox" checked={!!settings.resetOnStart} onChange={(e) => update({ resetOnStart: e.target.checked })} />
+                  <span>启动即清空（演示模式）</span>
+                </label>
+                <div className="settings-tip">
+                  默认 DeepSeek（OpenAI 兼容）。DeepSeek 官方模型请填 <code>deepseek-v4-pro</code> 或 <code>deepseek-v4-flash</code>；
+                  旧版 <code>deepseek-chat</code> / <code>deepseek-reasoner</code> 将于 2026/07/24 弃用。
+                  Base URL 默认 <code>https://api.deepseek.com</code>（无需加 /v1）。Key 仅存本机，应用直连厂商。
                 </div>
               </div>
-            )}
+
+              {/* 联网搜索 */}
+              <div className="backup-sec">
+                <div className="backup-sec-title">联网搜索</div>
+                <label className="backup-row"><span>模式</span>
+                  <select value={settings.searchMode} onChange={(e) => update({ searchMode: e.target.value })}>
+                    <option value="none">关闭（仅模型知识库）</option>
+                    <option value="app">应用侧 · 搜索 API 注入（RAG）</option>
+                    <option value="model">模型侧 · web_search 工具</option>
+                  </select>
+                </label>
+                {settings.searchMode === 'app' && (
+                  <>
+                    <label className="backup-row"><span>搜索服务</span>
+                      <select value={settings.searchProvider} onChange={(e) => update({ searchProvider: e.target.value })}>
+                        <option value="tavily">Tavily</option>
+                        <option value="serpapi">SerpAPI</option>
+                        <option value="bing">Bing</option>
+                      </select>
+                    </label>
+                    <label className="backup-row"><span>搜索 API Key</span>
+                      <span className="key-row">
+                        <input type={showKey ? 'text' : 'password'} value={settings.searchApiKey || ''}
+                          onChange={(e) => update({ searchApiKey: e.target.value })} placeholder="搜索服务 Key" />
+                        <button type="button" className="key-toggle" onClick={() => setShowKey((v) => !v)}>
+                          {showKey ? '隐藏' : '显示'}
+                        </button>
+                      </span>
+                    </label>
+                  </>
+                )}
+                {settings.searchMode === 'model' && (
+                  <label className="settings-toggle">
+                    <input type="checkbox" checked={!!settings.modelWebSearch} onChange={(e) => update({ modelWebSearch: e.target.checked })} />
+                    <span>启用 web_search 工具（需模型厂商支持，如 OpenAI o 系列；由厂商执行搜索，无需搜索 Key）</span>
+                  </label>
+                )}
+                <div className="settings-tip">
+                  应用侧：填入搜索服务 Key，AI 回答前先联网取资料注入上下文（受 CORS 限制，Tavily / SerpAPI 通常可直接用）。
+                  模型侧：由模型厂商代发搜索，无需搜索 Key，但 DeepSeek 等多数模型不支持此工具。
+                </div>
+              </div>
+
+              {/* 备份与恢复 */}
+              <div className="backup-sec">
+                <div className="backup-sec-title">备份与恢复</div>
+                <label className="backup-row"><span>范围</span>
+                  <select value={backupScope} onChange={(e) => setBackupScope(e.target.value)}>
+                    <option value="canvas">当前画布</option>
+                    <option value="app">整个应用（含对话与设置）</option>
+                  </select>
+                </label>
+                <label className="backup-row"><span>加密口令</span>
+                  <input type="password" placeholder="留空则不加密"
+                    value={backupPass} onChange={(e) => { setBackupPass(e.target.value); setBackupEncrypt(!!e.target.value) }} />
+                </label>
+                <div className="backup-tip">加密使用浏览器内置 AES-GCM，口令不会上传；忘记口令将无法恢复。</div>
+                <button className="backup-btn" onClick={handleExportBackup}>导出为 JSON</button>
+
+                <div className="backup-divider" />
+                <div className="backup-sec-title">导入恢复</div>
+                <input type="file" accept="application/json,.json" onChange={handleImportFile} />
+                {importParsed && importParsed.encrypted && (
+                  <label className="backup-row"><span>解密口令</span>
+                    <input type="password" placeholder="输入备份时设置的口令"
+                      value={importEncPass} onChange={(e) => setImportEncPass(e.target.value)} />
+                  </label>
+                )}
+                <label className="backup-row"><span>模式</span>
+                  <select value={importMode} onChange={(e) => setImportMode(e.target.value)}>
+                    <option value="merge">合并（仅添加新节点）</option>
+                    <option value="replace">替换（覆盖当前画布）</option>
+                  </select>
+                </label>
+                {importError && <div className="backup-err">{importError}</div>}
+                <button className="backup-btn" onClick={handleRestore} disabled={!importParsed}>开始恢复</button>
+              </div>
+
+              {/* 危险操作 */}
+              <div className="backup-sec danger-zone">
+                <div className="backup-sec-title">危险操作</div>
+                {!clearConfirm ? (
+                  <button className="tb-danger" onClick={() => setClearConfirm(true)}>清空画布</button>
+                ) : (
+                  <div className="clear-confirm">
+                    <span>确认清空全部节点与连线？</span>
+                    <div className="confirm-actions">
+                      <button className="danger" onClick={() => { useStore.getState().clear(); setClearConfirm(false) }}>确认清空</button>
+                      <button onClick={() => setClearConfirm(false)}>取消</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -943,33 +1060,38 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
         </div>
       )}
 
-      {/* 导入弹窗 */}
+      {/* 导入弹窗（复用备份向导视觉语言） */}
       {showImport && (
         <div className="modal-mask" onClick={() => setShowImport(false)}>
-          <div className="import-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="import-head"><span>📥 导入材料 → 拆解成图谱</span><button className="report-close" onClick={() => setShowImport(false)}>×</button></div>
-            <div className="import-tip">
-              把想法 / 文章 / 笔记，或其他 AI（ChatGPT、Claude、DeepSeek、豆包等）的聊天记录导出粘贴进来；
-              也支持上传 <b>.md / .txt / .docx / .pdf</b> 文件，或粘贴一个<b>可访问的分享链接</b>。AI 会把它提炼成「想法 → 方向 → 步骤 / 资料 / 洞察」的节点树落到画布。
+          <div className="backup-modal import-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="backup-head">
+              <span>📥 导入材料 → 拆解成图谱</span>
+              <button className="report-close" onClick={() => setShowImport(false)}>关闭</button>
             </div>
-            <label className="import-url-row">
-              分享链接（可选，尽力抓取；跨域可能被拦截则请复制文本）
-              <input className="import-url-input" value={importUrl} onChange={(e) => setImportUrl(e.target.value)}
-                placeholder="https://chatgpt.com/share/... 或 https://claude.ai/..." />
-            </label>
-            <textarea className="import-text" value={importText} onChange={(e) => setImportText(e.target.value)}
-              placeholder="把要拆解的材料粘贴到这里（也可上传文件，二选一或都填；文件优先）" rows={8} />
-            <div className="import-file-row">
-              <label className="import-file-btn">选择文件（.md / .txt / .docx / .pdf）
-                <input type="file" accept=".md,.markdown,.txt,.text,.json,.docx,.pdf" style={{ display: 'none' }}
-                  onChange={(e) => { const f = e.target.files?.[0]; setImportFileObj(f || null); setImportErr('') }} />
+            <div className="backup-body">
+              <div className="import-tip">
+                把想法 / 文章 / 笔记，或其他 AI（ChatGPT、Claude、DeepSeek、豆包等）的聊天记录导出粘贴进来；
+                也支持上传 <b>.md / .txt / .docx / .pdf</b> 文件，或粘贴一个<b>可访问的分享链接</b>。AI 会把它提炼成「想法 → 方向 → 步骤 / 资料 / 洞察」的节点树落到画布。
+              </div>
+              <label className="import-url-row">
+                分享链接（可选，尽力抓取；跨域可能被拦截则请复制文本）
+                <input className="import-url-input" value={importUrl} onChange={(e) => setImportUrl(e.target.value)}
+                  placeholder="https://chatgpt.com/share/... 或 https://claude.ai/..." />
               </label>
-              {importFileObj && <span className="import-file-name">{importFileObj.name}</span>}
-            </div>
-            {importErr && <div className="ai-error">{importErr}</div>}
-            <div className="confirm-actions">
-              <button className="primary" onClick={doImport} disabled={importBusy}>{importBusy ? '拆解中…' : '拆解成图谱'}</button>
-              <button onClick={() => { setShowImport(false); setImportText(''); setImportFileObj(null); setImportUrl(''); setImportErr('') }}>取消</button>
+              <textarea className="import-text" value={importText} onChange={(e) => setImportText(e.target.value)}
+                placeholder="把要拆解的材料粘贴到这里（也可上传文件，二选一或都填；文件优先）" rows={8} />
+              <div className="import-file-row">
+                <label className="import-file-btn">选择文件（.md / .txt / .docx / .pdf）
+                  <input type="file" accept=".md,.markdown,.txt,.text,.json,.docx,.pdf" style={{ display: 'none' }}
+                    onChange={(e) => { const f = e.target.files?.[0]; setImportFileObj(f || null); setImportErr('') }} />
+                </label>
+                {importFileObj && <span className="import-file-name">{importFileObj.name}</span>}
+              </div>
+              {importErr && <div className="ai-error">{importErr}</div>}
+              <div className="confirm-actions">
+                <button className="primary" onClick={doImport} disabled={importBusy}>{importBusy ? '拆解中…' : '拆解成图谱'}</button>
+                <button onClick={() => { setShowImport(false); setImportText(''); setImportFileObj(null); setImportUrl(''); setImportErr('') }}>取消</button>
+              </div>
             </div>
           </div>
         </div>

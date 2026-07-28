@@ -148,8 +148,6 @@ export default function CustomNode({ id, data, selected }) {
 
       <Handle type="target" position={Position.Left} style={{ background: cfg.color }} />
       <Handle type="source" position={Position.Right} style={{ background: cfg.color }} />
-      <Handle type="target" position={Position.Top} style={{ background: cfg.color }} />
-      <Handle type="source" position={Position.Bottom} style={{ background: cfg.color }} />
     </div>
   )
 }

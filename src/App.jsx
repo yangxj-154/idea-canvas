@@ -6,6 +6,7 @@ import {
   ReactFlowProvider,
   Background,
   MiniMap,
+  Controls,
   useReactFlow,
   SelectionMode,
   getNodesBounds,
@@ -69,7 +70,7 @@ function Canvas() {
     selectionMode, setSelectionMode, setSelectedNodeIds,
     undo, redo, saveStatus, past, future,
   } = useStore()
-  const { screenToFlowPosition, fitView, zoomIn, zoomOut } = useReactFlow()
+  const { screenToFlowPosition, fitView, zoomIn, zoomOut, setCenter } = useReactFlow()
   const [inspector, setInspector] = useState(null)
   const [filterType, setFilterType] = useState(null)
   const [editId, setEditId] = useState(null)
@@ -114,6 +115,10 @@ function Canvas() {
   const [pngPreview, setPngPreview] = useState(null)
   const [capturing, setCapturing] = useState(false)
 
+  // 节点搜索
+  const [search, setSearch] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchIdx, setSearchIdx] = useState(0)
   // 全局状态提示条（2s 自动消失）
   const [statusToast, setStatusToast] = useState(null)
   useEffect(() => {
@@ -288,12 +293,26 @@ function Canvas() {
     setCapturing(true)
     // 等一帧，确保隐藏项生效
     await new Promise((r) => setTimeout(r, 60))
+    // html-to-image 1.11.x 回归：克隆时不会把连线描边的 CSS 内联进导出图，
+    // 导致连线在 PNG 里整条消失（屏幕端正常）。导出前把每条连线（含文字）的描边/填充以
+    // "计算值"写入内联 style，确保被捕获；finally 中还原，不影响屏幕端样式。
+    const rfEl = document.querySelector('.react-flow')
+    const edgeEls = rfEl
+      ? Array.from(rfEl.querySelectorAll('.react-flow__edge-path, .react-flow__edge-textbg, .react-flow__edge-text'))
+      : []
+    const savedStyles = edgeEls.map((el) => el.getAttribute('style'))
     try {
       const bounds = getNodesBounds(rfNodes)
       const margin = 80
       const width = Math.ceil(bounds.width + margin * 2)
       const height = Math.ceil(bounds.height + margin * 2)
       const transform = getViewportForBounds(bounds, width, height, 0.2, 2, 0.1)
+      edgeEls.forEach((el) => {
+        const cs = getComputedStyle(el)
+        el.style.stroke = cs.stroke
+        el.style.strokeWidth = cs.strokeWidth
+        el.style.fill = cs.fill
+      })
       const dataUrl = await toPng(viewport, {
         backgroundColor: '#F5F1E8',
         width,
@@ -315,6 +334,11 @@ function Canvas() {
       console.warn('PNG 导出失败', e)
       alert('导出 PNG 失败：' + (e?.message || e))
     } finally {
+      edgeEls.forEach((el, i) => {
+        const s = savedStyles?.[i]
+        if (s === null) el.removeAttribute('style')
+        else if (s !== undefined) el.setAttribute('style', s)
+      })
       setCapturing(false)
     }
   }
@@ -404,6 +428,31 @@ function Canvas() {
   const handleRelate = () => aiPanelRef.current?.relate()
   const handleReport = () => aiPanelRef.current?.report()
 
+  // 节点搜索：跳转到指定节点并选中
+  const gotoNode = useCallback((node) => {
+    const w = 210, h = 96
+    setCenter(node.position.x + w / 2, node.position.y + h / 2, { zoom: 1.2, duration: 400 })
+    setSelectedNode(node.id)
+    setSearchOpen(false)
+    setSearch('')
+  }, [setCenter, setSelectedNode])
+
+  const searchHits = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return []
+    return nodes
+      .filter((n) => (n.data?.content || '').toLowerCase().includes(q))
+      .slice(0, 50)
+  }, [search, nodes])
+
+  const onSearchKey = (e) => {
+    if (!searchHits.length) return
+    if (e.key === 'ArrowDown') { e.preventDefault(); setSearchIdx((i) => Math.min(i + 1, searchHits.length - 1)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setSearchIdx((i) => Math.max(i - 1, 0)) }
+    else if (e.key === 'Enter') { e.preventDefault(); const hit = searchHits[searchIdx]; if (hit) gotoNode(hit) }
+    else if (e.key === 'Escape') { setSearchOpen(false); setSearch('') }
+  }
+
   // 底栏键盘事件：Enter 发送，Shift+Enter 换行
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -484,6 +533,8 @@ function Canvas() {
             onPaneClick={onPaneClick}
             nodeTypes={nodeTypes}
             fitView
+            minZoom={0.1}
+            maxZoom={2.5}
             snapToGrid snapGrid={[20, 20]}
             zoomOnDoubleClick={false}
             defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
@@ -495,6 +546,7 @@ function Canvas() {
           >
             <Background gap={30} color="#e5e5e5" size={1.5} />
             <MiniMap pannable zoomable nodeColor={(n) => NODE_TYPES[n.data?.type || 'idea']?.color || '#FF2E92'} maskColor="rgba(0,0,0,0.7)" />
+            <Controls showInteractive={false} position="bottom-right" />
           </ReactFlow>
 
           {/* 画布空状态：品牌视觉锤 */}
@@ -538,6 +590,36 @@ function Canvas() {
                 {selectionMode === 'select' ? '▢' : '✋'}
               </button>
             </div>
+          </div>
+
+          {/* 节点搜索：画布内、缩略图左侧；全屏时亦可搜索 */}
+          <div className="canvas-search">
+            <input
+              className="search-input"
+              value={search}
+              placeholder="搜索节点…"
+              aria-label="搜索节点"
+              onChange={(e) => { setSearch(e.target.value); setSearchOpen(true); setSearchIdx(0) }}
+              onFocus={() => setSearchOpen(true)}
+              onKeyDown={onSearchKey}
+            />
+            {searchOpen && search && (
+              <div className="search-drop">
+                {searchHits.length === 0 && <div className="search-empty">无匹配节点</div>}
+                {searchHits.map((n, i) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className={`search-item${i === searchIdx ? ' active' : ''}`}
+                    onMouseEnter={() => setSearchIdx(i)}
+                    onClick={() => gotoNode(n)}
+                  >
+                    <span className="search-dot" style={{ background: NODE_TYPES[n.data?.type || 'idea']?.color }} />
+                    <span className="search-text">{(n.data?.content || '').split('\n')[0] || '(空卡片)'}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* 检视面板 */}
@@ -656,6 +738,7 @@ function Canvas() {
           </div>
         </div>
       )}
+
     </div>
   )
 }

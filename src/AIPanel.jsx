@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHand
 import { createPortal } from 'react-dom'
 import { useReactFlow } from '@xyflow/react'
 import { nanoid } from 'nanoid'
+import dagre from 'dagre'
 import { useStore } from './store'
 import { NODE_TYPES } from './nodeTypes'
 import { loadSettings, saveSettings, loadChat, saveChat } from './settings'
@@ -338,9 +339,8 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
         setBusy(false)
         return
       }
-      // 重新排版：分层树布局，卡片不再重叠
-      const layout = layoutTree(st.nodes, st.edges)
-      st.setNodes((ns) => ns.map((n) => (layout[n.id] ? { ...n, position: layout[n.id] } : n)))
+      // 重新排版：基于 dagre 的分层树布局，卡片不再重叠（带 600ms 平滑过渡 + 自动适应画布）
+      await layoutTree({ nodes: st.nodes, edges: st.edges, setNodes: st.setNodes, fitView })
       const laidNodes = useStore.getState().nodes
       const selId = st.selectedNodeId
       const selNode = selId ? st.nodes.find((n) => n.id === selId) : null
@@ -406,66 +406,140 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
     }
   }
 
-  // 分层树布局：按 parent→child 还原层级，避免卡片重叠（优化画布用）
-  // 多个想法根时，每棵树独立排版后水平排列，不再重叠。
-  function layoutTree(nodes, edges) {
+  // 重新排版：基于 dagre 的有向图分层布局（优化画布用）
+  // 仅修改节点 position，绝不触碰节点内容 / 类型 / 连线数据。
+  async function layoutTree({ nodes, edges, setNodes, fitView }) {
+    // 边界：空画布直接返回
+    if (!nodes.length) return
+    // 边界：节点过多，跳过排版以保持性能
+    if (nodes.length > 200) {
+      window.alert('节点过多（>200），跳过自动排版以保持性能')
+      return
+    }
+
+    const NODE_W = 210
+    const NODE_H = 96
+    const H_GAP = 280   // 同层水平间距（中心距）
+    const V_GAP = 220   // 层间垂直间距（中心距）
+    const TREE_GAP = 300 // 多棵树之间的水平间距
+    const ORPHAN_GAP = 300 // 孤立区与树区的垂直间距
+    const COLS = 6      // 孤立节点每行最多 6 个
+    const TOP_Y = 120   // 根节点行 y 起点
+
+    const sizeOf = (n) => ({
+      w: n.measured?.width || n.width || NODE_W,
+      h: n.measured?.height || n.height || NODE_H,
+    })
+    const inEdge = new Set(edges.map((e) => e.target))
+    const connected = new Set()
+    edges.forEach((e) => { connected.add(e.source); connected.add(e.target) })
+
+    // 根节点 = 无入边；多个根按"原有 position.x"从小到大排序，从左到右占独立区域
+    const origX = new Map(nodes.map((n) => [n.id, n.position?.x ?? 0]))
+    let roots = nodes.filter((n) => !inEdge.has(n.id))
+    if (!roots.length && nodes.length) roots = [nodes[0]]
+    roots.sort((a, b) => (origX.get(a.id) ?? 0) - (origX.get(b.id) ?? 0))
+
+    // 孤立节点 = 没有任何连线的节点
+    const isolated = nodes.filter((n) => !connected.has(n.id))
+    const isolatedSet = new Set(isolated.map((n) => n.id))
+
+    // 1) dagre 计算分层坐标（TB：上 → 下）
+    const g = new dagre.graphlib.Graph()
+    g.setGraph({
+      rankdir: 'TB',
+      nodesep: Math.max(20, H_GAP - NODE_W),
+      ranksep: Math.max(20, V_GAP - NODE_H),
+      marginx: 20,
+      marginy: 20,
+    })
+    g.setDefaultEdgeLabel(() => ({}))
+    const measured = new Map()
+    nodes.forEach((n) => {
+      const s = sizeOf(n)
+      measured.set(n.id, s)
+      g.setNode(n.id, { width: s.w, height: s.h })
+    })
+    edges.forEach((e) => {
+      if (connected.has(e.source) && connected.has(e.target)) g.setEdge(e.source, e.target)
+    })
+    dagre.layout(g)
+
+    // dagre 返回中心点，转 React Flow 左上角坐标
+    const pos = new Map()
+    nodes.forEach((n) => {
+      const dn = g.node(n.id)
+      const s = measured.get(n.id)
+      pos.set(n.id, { x: dn.x - s.w / 2, y: dn.y - s.h / 2 })
+    })
+
+    // 2) 按根重组：每个子树平移到独立区域，从左到右
     const childMap = new Map()
-    const hasParent = new Set()
     edges.forEach((e) => {
       if (!childMap.has(e.source)) childMap.set(e.source, [])
       childMap.get(e.source).push(e.target)
-      hasParent.add(e.target)
     })
-    let roots = nodes.filter((n) => !hasParent.has(n.id)).map((n) => n.id)
-    if (roots.length === 0 && nodes.length) roots = [nodes[0].id]
-
-    const COL = 240
-    const ROWGAP = 100
-    const TREE_GAP = 340 // 棵树之间的水平间距
-
-    // 对单棵子树做 BFS 分层布局，返回 { pos, maxDepth, nodeCount }
-    function layoutSubtree(rootId) {
-      const depthOf = new Map()
-      const order = []
-      const queue = [[rootId, 0]]
-      depthOf.set(rootId, 0)
-      while (queue.length) {
-        const [id, d] = queue.shift()
-        order.push([id, d])
-        for (const c of childMap.get(id) || []) {
-          if (!depthOf.has(c)) { depthOf.set(c, d + 1); queue.push([c, d + 1]) }
-        }
+    const subtreeIds = (rootId) => {
+      const out = []
+      const stack = [rootId]
+      while (stack.length) {
+        const id = stack.pop()
+        out.push(id)
+        for (const c of childMap.get(id) || []) stack.push(c)
       }
-      const byDepth = new Map()
-      order.forEach(([id, d]) => {
-        if (!byDepth.has(d)) byDepth.set(d, [])
-        byDepth.get(d).push(id)
+      return out
+    }
+    const groups = roots.map((r) => {
+      const ids = subtreeIds(r.id)
+      const xs = ids.map((id) => pos.get(id).x)
+      const minX = Math.min(...xs)
+      const maxX = Math.max(...xs)
+      return { ids, minX, maxX, w: maxX - minX }
+    })
+    let cursor = 0
+    groups.forEach((grp) => {
+      const shift = cursor - grp.minX
+      grp.ids.forEach((id) => { const p = pos.get(id); p.x += shift })
+      cursor += grp.w + TREE_GAP
+    })
+
+    // 3) 整片森林：根行对齐到 TOP_Y，水平居中于视口宽度 / 2
+    const rfEl = (typeof document !== 'undefined') ? document.querySelector('.react-flow') : null
+    const vw = rfEl ? rfEl.clientWidth : (typeof window !== 'undefined' ? window.innerWidth : 1280)
+    const xsAll = nodes.map((n) => pos.get(n.id).x)
+    const centerX = (Math.min(...xsAll) + Math.max(...xsAll)) / 2
+    const minY = Math.min(...nodes.map((n) => pos.get(n.id).y))
+    const dx = vw / 2 - centerX
+    const dy = TOP_Y - minY
+    nodes.forEach((n) => { const p = pos.get(n.id); p.x += dx; p.y += dy })
+
+    // 4) 孤立节点放最底部网格（每行最多 COLS 个，与树区保持 ORPHAN_GAP）
+    if (isolated.length) {
+      const treeMaxY = Math.max(0, ...nodes.filter((n) => !isolatedSet.has(n.id)).map((n) => {
+        const p = pos.get(n.id)
+        const s = measured.get(n.id)
+        return p.y + s.h
+      }))
+      const startY = treeMaxY + ORPHAN_GAP
+      const cellW = NODE_W + H_GAP
+      const cellH = NODE_H + V_GAP
+      const gridW = COLS * cellW
+      const startX = vw / 2 - gridW / 2 + H_GAP / 2
+      isolated.forEach((n, i) => {
+        const col = i % COLS
+        const row = Math.floor(i / COLS)
+        pos.set(n.id, { x: startX + col * cellW, y: startY + row * cellH })
       })
-      const pos = {}
-      byDepth.forEach((ids, d) => {
-        ids.forEach((id, i) => { pos[id] = { x: d * COL, y: i * ROWGAP } })
-      })
-      return { pos, maxDepth: byDepth.size ? Math.max(...byDepth.keys()) : 0, count: order.length }
     }
 
-    // 每棵树独立布局，再水平拼接
-    const subtrees = roots.map((r) => layoutSubtree(r))
-    const pos = {}
-    let xOffset = 0
-    for (const st of subtrees) {
-      for (const [id, p] of Object.entries(st.pos)) {
-        pos[id] = { x: p.x + xOffset, y: p.y }
-      }
-      xOffset += (st.maxDepth + 1) * COL + TREE_GAP
-    }
-
-    // 游离节点放最后
-    const maxGlobalX = xOffset
-    let orphan = 0
-    nodes.forEach((n) => {
-      if (!pos[n.id]) { pos[n.id] = { x: maxGlobalX, y: orphan * ROWGAP }; orphan++ }
-    })
-    return pos
+    // 5) 批量更新 + 600ms 平滑过渡 + 自动适应画布
+    if (rfEl) rfEl.classList.add('layouting')
+    setNodes((ns) => ns.map((n) => {
+      const p = pos.get(n.id)
+      return p ? { ...n, position: p } : n
+    }))
+    setTimeout(() => { try { fitView({ padding: 0.2, duration: 400 }) } catch (e) {} }, 60)
+    setTimeout(() => { if (rfEl) rfEl.classList.remove('layouting') }, 660)
   }
 
   function findFreePosition(parentNode, allNodes, w = 170, h = 70) {

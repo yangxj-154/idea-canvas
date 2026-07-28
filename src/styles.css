@@ -1,5 +1,5 @@
 /* ============================================================
-   LAPOP v0.4.0 — MEMPHIS POP ART 风格
+   LAPOP v0.9.8 — MEMPHIS POP ART 风格
    设计令牌：黑底 / 亮粉·蓝·黄·绿撞色 / 粗边框 / 错位阴影
    ============================================================ */
 
@@ -210,8 +210,8 @@ input, textarea, select { font-family: inherit; }
   color: var(--blue);
 }
 .save-status.saved {
-  border-color: var(--green, #2ecc71);
-  color: var(--green, #2ecc71);
+  border-color: #1B7A45;
+  color: #1B7A45;
 }
 /* 画布正上方保存指示器：仅保存后短暂出现，黑字，不常驻 */
 .save-indicator {
@@ -283,46 +283,6 @@ input, textarea, select { font-family: inherit; }
 .export-menu button:hover { background: var(--hotpink); color: var(--white); }
 .export-menu button:disabled { opacity: 0.6; cursor: default; }
 
-/* 导出下拉菜单 */
-.export-wrap {
-  position: relative;
-  display: inline-block;
-}
-.export-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 40;
-  background: var(--white);
-  border: var(--border-thick) solid var(--black);
-  border-radius: var(--radius);
-  box-shadow: 4px 4px 0 var(--hotpink);
-  display: flex;
-  flex-direction: column;
-  min-width: 220px;
-  overflow: hidden;
-}
-.export-menu button {
-  text-align: left;
-  border: none;
-  border-bottom: 1.5px solid rgba(0,0,0,0.08);
-  background: var(--white);
-  color: var(--black);
-  padding: 10px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  border-radius: 0;
-}
-.export-menu button:last-child { border-bottom: none; }
-.export-menu button:hover {
-  background: var(--hotpink);
-  color: var(--white);
-}
-.export-menu button:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
 
 /* PNG 导出预览弹窗 */
 .png-modal {
@@ -695,10 +655,10 @@ input, textarea, select { font-family: inherit; }
   border: var(--border-thick) solid var(--white);
   border-radius: var(--radius);
   position: relative;
-  transition: transform .18s ease;
+  transition: box-shadow .18s ease;
 }
 .ai-msg:hover {
-  transform: scale(1.04);
+  box-shadow: 3px 3px 0 var(--hotpink);
 }
 .ai-msg.ai-user {
   background: var(--hotpink);
@@ -1219,15 +1179,9 @@ input, textarea, select { font-family: inherit; }
 }
 
 /* 画布控件区（右上角：缩放） */
+/* canvas-toolbar 仅作包裹容器；定位由内部 .canvas-controls 负责，避免双重绝对定位叠放 */
 .canvas-toolbar {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  z-index: 10;
+  position: static;
 }
 
 /* 缩放控件 */
@@ -1305,6 +1259,18 @@ input, textarea, select { font-family: inherit; }
   100% { opacity: 1; transform: translateX(0) scale(1); }
 }
 
+/* 顶部分类色条：一眼识别节点类型 */
+.node-card::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  right: -2px;
+  height: 4px;
+  background: var(--node-color);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
 /* 错位阴影边框（::after）— 第二层边框偏移 */
 .node-card::after {
   content: '';
@@ -1366,6 +1332,7 @@ input, textarea, select { font-family: inherit; }
 /* 选中状态：3px 描边 + 对应分类色错位阴影 */
 .node-card.selected {
   border-width: 3px;
+  opacity: 1;
 }
 .node-card.type-idea.selected,
 .node-card[data-type="idea"].selected { box-shadow: 4px 4px 0 var(--blue); }
@@ -1427,7 +1394,7 @@ input, textarea, select { font-family: inherit; }
   -webkit-appearance: none;
   border: var(--border-thick) solid var(--black);
   background: transparent;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 1.2px;
@@ -1496,9 +1463,6 @@ input, textarea, select { font-family: inherit; }
 }
 .node-card.read {
   opacity: 0.55;
-}
-.node-card.selected {
-  opacity: 1;
 }
 
 /* 插图按钮（缩小到不抢视觉） */
@@ -1631,16 +1595,10 @@ input, textarea, select { font-family: inherit; }
   object-fit: cover;
 }
 
-/* 连线样式：2px 纯黑直角实线 */
-/* 连线样式：2px 纯黑流动蚂蚁线（无标签），hover 高亮为品牌粉 */
+/* 连线样式：2px 纯黑直角实线（默认静态；hover / 选中 / chain 高亮时流动，见下） */
 .react-flow .react-flow__edge-path {
   stroke: var(--black);
   stroke-width: 2;
-  stroke-dasharray: 6 4;
-  animation: dashdraw 0.9s linear infinite;
-}
-@keyframes dashdraw {
-  to { stroke-dashoffset: -24; }
 }
 .react-flow__edge:hover .react-flow__edge-path {
   stroke: var(--hotpink);
@@ -2734,4 +2692,88 @@ input, textarea, select { font-family: inherit; }
 }
 .welcome-start:active {
   transform: scale(0.97);
+}
+
+/* ============================================================
+   响应式：移动端 / 平板（≤768px）改为上下单栏
+   AI 面板占上方、画布占下方，修复此前无 @media 断点
+   导致窄屏硬分栏挤崩的问题（与 PWA 可装承诺对齐）
+   ============================================================ */
+@media (max-width: 768px) {
+  .toolbar {
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  .brand-tagline { display: none; }
+  .brand-lapop { font-size: 20px; }
+  .tb-btn {
+    padding: 6px 12px;
+    font-size: 11px;
+    letter-spacing: 0;
+  }
+
+  .app-body { flex-direction: column; }
+  /* AI 面板宽度由 inline style 控制，窄屏强制覆盖为全宽并限定高度占比 */
+  .ai-panel {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 0 0 42% !important;
+    border-right: none;
+    border-bottom: var(--border-thick) solid var(--white);
+  }
+  .canvas-area {
+    width: 100% !important;
+    flex: 1 1 58% !important;
+  }
+  .divider { display: none; }
+
+  .canvas-toolbar { top: 8px; right: 8px; }
+  .canvas-controls button { width: 32px; height: 32px; font-size: 14px; }
+
+  .bottom-bar {
+    height: auto;
+    min-height: 54px;
+    gap: 6px;
+    padding: 6px 8px;
+    flex-wrap: wrap;
+  }
+  .bottom-input { font-size: 14px; }
+  .bottom-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+    flex: 1 1 auto;
+  }
+
+  .inspector {
+    top: 8px; left: 8px; right: 8px; bottom: 8px;
+    width: auto;
+  }
+  .detail-popover { max-width: 92vw; }
+  .welcome-modal { padding: 22px 18px 20px; }
+}
+
+/* ============================================================
+   无障碍：尊重系统"减少动态效果"偏好，关闭所有非必要动画
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* 连线保持静态（即便 hover / chain 也不流动） */
+  .react-flow .react-flow__edge-path {
+    animation: none !important;
+  }
+}
+
+/* 优化画布排版时的 600ms 平滑过渡（reduced-motion 用户已在上方被全局降级，不会触发） */
+.react-flow.layouting .react-flow__node {
+  transition: transform 600ms ease;
 }

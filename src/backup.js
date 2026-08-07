@@ -1,5 +1,5 @@
 import { get } from 'idb-keyval'
-import { STORAGE_KEY } from './store'
+import { STORAGE_KEY, useStore } from './store'
 import { loadSettings, loadChat, saveSettings, saveChat } from './settings'
 
 // 收集整个应用状态（画布 + 设置 + 会话），用于完整备份
@@ -14,7 +14,7 @@ export async function collectAppState() {
     exportedAt: new Date().toISOString(),
     canvas: { nodes: canvas.nodes || [], edges: canvas.edges || [] },
     settings: settings || null,
-    chat: chat || { messages: [], threads: {} },
+    chat: chat || {},
   }
 }
 
@@ -82,7 +82,13 @@ export async function applyAppState(parsed, mode, store) {
     store.setNodes(() => incomingNodes)
     if (store.setEdges) store.setEdges(() => incomingEdges)
     if (parsed.settings) await saveSettings(parsed.settings)
-    if (parsed.chat) await saveChat(parsed.chat)
+    if (parsed.chat) {
+      // 兼容旧版导出：chat 为全局 { messages, threads } → 归到当前画布
+      const chatToSave = Array.isArray(parsed.chat.messages)
+        ? { [useStore.getState().currentId || 'c1']: { messages: parsed.chat.messages, threads: parsed.chat.threads || {} } }
+        : parsed.chat
+      await saveChat(chatToSave)
+    }
   } else {
     store.setNodes((ns) => {
       const have = new Set(ns.map((n) => n.id))

@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import { NODE_TYPES, NODE_TYPE_KEYS } from './nodeTypes'
+import { useStore } from './store'
 
 function labelOf(n) {
   const c = (n?.data?.content || '').split('\n').find((l) => l.trim())
@@ -19,19 +21,35 @@ export default function Inspector({
   onClearFilter,
   onFocus,
 }) {
-  const byId = new Map(nodes.map((n) => [n.id, n]))
+  // 多画布：从 store 直接读取全部画布，用于画布列表与跨画布关联纵览
+  const { canvases, currentId, switchCanvas, addCanvas, renameCanvas } = useStore()
+  // 行内重命名状态
+  const [renamingId, setRenamingId] = useState(null)
+  const [draftName, setDraftName] = useState('')
+  const commitRename = (id) => {
+    const name = (draftName || '').trim()
+    if (name) renameCanvas(id, name)
+    setRenamingId(null)
+  }
 
-  // 跨想法关联：两端属于不同想法根
-  const crossEdges = edges
-    .filter((e) => rootOf.get(e.source) !== rootOf.get(e.target))
-    .map((e) => ({
-      source: e.source,
-      target: e.target,
-      label: e.label || '关联',
-      reason: e.data?.reason || '',
-    }))
+  const canvasName = (id) => canvases.find((c) => c.id === id)?.name || id
 
-  // 统计
+  // 全局节点映射 + 节点 → 所属画布映射
+  const allNodes = canvases.flatMap((c) =>
+    c.nodes.map((n) => ({ ...n, _canvas: c.id, _canvasName: c.name })),
+  )
+  const byId = new Map(allNodes.map((n) => [n.id, n]))
+  const canvasOf = new Map(allNodes.map((n) => [n.id, n._canvas]))
+
+  // 跨画布关联：直接读取顶层 crossEdges（两端节点分属不同画布）
+  const storeCrossEdges = useStore((s) => s.crossEdges) || []
+  const crossEdges = storeCrossEdges.map((e) => ({
+    ...e,
+    sourceLabel: labelOf(byId.get(e.source)),
+    targetLabel: labelOf(byId.get(e.target)),
+  }))
+
+  // 统计（基于当前画布）
   const total = nodes.length
   const byType = {}
   NODE_TYPE_KEYS.forEach((k) => (byType[k] = 0))
@@ -57,62 +75,92 @@ export default function Inspector({
         </div>
 
         <div className="insp-body">
+          {/* 跨画布关联：全局纵览，找出不同画布（想法）之间的联系 */}
           <div className="insp-section-title">
-            跨想法关联 <span className="insp-count">{crossEdges.length}</span>
+            跨画布关联 <span className="insp-count">{crossEdges.length}</span>
           </div>
           {crossEdges.length === 0 ? (
             <div className="insp-empty">
-              暂无跨想法关联。可点 AI 面板的「自动关联」让 AI 找出不同想法之间的实体联系。
+              暂无跨画布关联。在不同画布间连线，或运行「优化画布」让 AI 发现想法之间的联系。
             </div>
           ) : (
             crossEdges.map((e, i) => (
               <div
                 key={i}
-                className="rel-row"
-                onClick={() => onFocus([e.source, e.target])}
-                title="点击在画布中聚焦这两条卡片"
+                className="rel-row rel-cross"
+                onClick={() => {
+                  switchCanvas(e.sourceCanvas)
+                  setTimeout(() => onFocus([e.source]), 60)
+                }}
+                title="点击切到源节点所在画布并聚焦"
               >
                 <div className="rel-line">
-                  <b>{labelOf(byId.get(e.source))}</b>
+                  <b>{e.sourceLabel}</b>
                   <span className="rel-arrow"> → </span>
-                  <b>{labelOf(byId.get(e.target))}</b>
+                  <b>{e.targetLabel}</b>
                 </div>
                 <div className="rel-meta">
                   <span className="rel-tag">{e.label}</span>
-                  {e.reason && <span className="rel-reason">{e.reason}</span>}
-                </div>
-              </div>
-            ))
-          )}
-
-          <div className="insp-section-title" style={{ marginTop: 14 }}>
-            想法清单 <span className="insp-count">{roots.length}</span>
-          </div>
-          {roots.length === 0 ? (
-            <div className="insp-empty">画布还没有想法根节点。</div>
-          ) : (
-            roots.map((rid, i) => (
-              <div
-                key={i}
-                className="rel-row"
-                onClick={() => onFocus(membersOf.get(rid) || [rid])}
-                title="点击聚焦该想法及其全部子节点"
-              >
-                <div className="rel-line">
-                  <span
-                    className="root-dot"
-                    style={{ background: NODE_TYPES.idea.color }}
-                  />
-                  <b>{labelOf(byId.get(rid))}</b>
-                </div>
-                <div className="rel-meta">
                   <span className="rel-reason">
-                    {membersOf.get(rid)?.length || 1} 个节点
+                    {canvasName(e.sourceCanvas)} → {canvasName(e.targetCanvas)}
                   </span>
                 </div>
               </div>
             ))
           )}
+
+          {/* 画布列表：替代原「想法清单」，支持切换与新建 */}
+          <div className="insp-section-title" style={{ marginTop: 14 }}>
+            画布 <span className="insp-count">{canvases.length}</span>
+          </div>
+          {canvases.map((c) => (
+            <div
+              key={c.id}
+              className={`rel-row${c.id === currentId ? ' is-current' : ''}`}
+              onClick={() => switchCanvas(c.id)}
+              title="点击切换到该画布"
+            >
+              <div className="rel-line">
+                <span
+                  className="root-dot"
+                  style={{ background: c.id === currentId ? NODE_TYPES.idea.color : '#bbb' }}
+                />
+                {renamingId === c.id ? (
+                  <input
+                    className="rel-edit-input"
+                    autoFocus
+                    value={draftName}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setDraftName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRename(c.id)
+                      if (e.key === 'Escape') setRenamingId(null)
+                    }}
+                    onBlur={() => commitRename(c.id)}
+                  />
+                ) : (
+                  <b>{c.name}</b>
+                )}
+                <button
+                  className="rel-rename-btn"
+                  title="重命名画布"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setDraftName(c.name)
+                    setRenamingId(c.id)
+                  }}
+                >
+                  ✎
+                </button>
+              </div>
+              <div className="rel-meta">
+                <span className="rel-reason">{c.nodes.length} 个节点</span>
+              </div>
+            </div>
+          ))}
+          <button className="insp-add-canvas" onClick={() => addCanvas()}>
+            ＋ 新建画布
+          </button>
         </div>
       </div>
     )
@@ -143,7 +191,7 @@ export default function Inspector({
           </div>
           <div className="stat-cell">
             <div className="stat-num">{crossEdges.length}</div>
-            <div className="stat-label">跨想法关联</div>
+            <div className="stat-label">跨画布关联</div>
           </div>
           <div className="stat-cell">
             <div className="stat-num">{roots.length}</div>

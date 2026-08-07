@@ -56,6 +56,9 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
   const [importBusy, setImportBusy] = useState(false)
   const [importErr, setImportErr] = useState('')
   const [clearConfirm, setClearConfirm] = useState(false)
+  // 优化画布：批量审阅（Human-in-the-loop）状态
+  const [reviewDiff, setReviewDiff] = useState(null)
+  const [reviewSel, setReviewSel] = useState({ add: [], merge: [], relate: [] })
   const scrollRef = useRef(null)
   // 标记历史会话是否已载入：载入前不持久化，避免挂载时的空值覆盖磁盘旧数据
   const chatLoaded = useRef(false)
@@ -68,35 +71,54 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
   // 每个节点的下钻对话：nodeId -> [ {role, content} ]，与主会话分离且持久化
   const [threads, setThreads] = useState({})
 
+  // 按画布隔离会话：chatMapRef 保存全部画布的会话；messages/threads 仅承载「当前画布」
+  const currentId = useStore((s) => s.currentId)
+  const chatMapRef = useRef({})
+  const latestChatRef = useRef({ messages: [], threads: {} })
+  const prevCanvasRef = useRef(null)
+  // 每次渲染同步最新会话，供切换画布时把上一画布的改动刷回 map
+  latestChatRef.current = { messages, threads }
+
   useEffect(() => {
     loadSettings().then((s) => {
       if (s) setSettings((p) => ({ ...p, ...s }))
-      // 开发/演示模式：resetOnStart 时不加载历史会话，保持初始空对话
-      if (!s?.resetOnStart) {
-        loadChat().then((c) => {
-          if (c) {
-            if (Array.isArray(c.messages)) setMessages(c.messages)
-            if (c.threads && typeof c.threads === 'object') setThreads(c.threads)
-          }
-          // 无论是否有历史数据，载入流程结束后再允许持久化
-          chatLoaded.current = true
-        })
-      } else {
-        chatLoaded.current = true
-      }
+    })
+    // 始终从本地持久层恢复历史会话（按画布隔离，启动不再自动清空）
+    loadChat().then((map) => {
+      chatMapRef.current = map && typeof map === 'object' ? map : {}
+      chatLoaded.current = true
+      const id = useStore.getState().currentId
+      const slice = chatMapRef.current[id]
+      setMessages(slice?.messages || [])
+      setThreads(slice?.threads || {})
     })
   }, [])
+
+  // 切换画布：先把上一画布的最新会话刷回 map，再载入目标画布的会话（新画布自然是空白）
+  useEffect(() => {
+    if (!chatLoaded.current) return
+    const prev = prevCanvasRef.current
+    if (prev && prev !== currentId) {
+      chatMapRef.current[prev] = latestChatRef.current
+    }
+    prevCanvasRef.current = currentId
+    const slice = chatMapRef.current[currentId]
+    setMessages(slice?.messages || [])
+    setThreads(slice?.threads || {})
+  }, [currentId])
 
   useEffect(() => {
     saveSettings(settings)
   }, [settings])
 
-  // 会话持久化：主会话 + 各节点下钻对话，防抖写入本地
+  // 会话持久化：按当前画布写入，整张 map（含其它画布会话）一并落盘
   useEffect(() => {
     if (!chatLoaded.current) return
-    const t = setTimeout(() => saveChat({ messages, threads }), 400)
+    const t = setTimeout(() => {
+      saveChat({ ...chatMapRef.current, [currentId]: { messages, threads } })
+    }, 400)
     return () => clearTimeout(t)
-  }, [messages, threads])
+  }, [messages, threads, currentId])
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -360,59 +382,125 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
         focusContent: selNode?.data.content || '',
         subgraph,
       })
-      const newNodes = []
-      const newEdges = []
-      res.add.forEach((a) => {
-        const parent = laidNodes.find((n) => n.id === a.parentId) || st.nodes.find((n) => n.id === a.parentId) || st.nodes[0]
-        if (!parent) return
-        const id = nanoid(6)
-        const pos = findFreePosition(parent, [...laidNodes, ...newNodes])
-        newNodes.push({
-          id, type: 'custom', position: pos,
-          data: { type: a.type || 'step', content: [a.title, a.body].filter(Boolean).join('\n'), ai: true, read: false },
+      const firstLine = (c) => (c || '').split('\n').find((l) => l.trim()) || ''
+      const parentLabelOf = (pid) => {
+        const p = laidNodes.find((n) => n.id === pid)
+        return p ? firstLine(p.data.content) || '（根卡片）' : '（无）'
+      }
+      // 构建「待确认改动清单」而非直接落图（Human-in-the-loop）
+      const addDiff = res.add.map((a) => ({
+        ...a,
+        label: [a.title, a.body].filter(Boolean).join(' / ') || '新节点',
+        parentLabel: parentLabelOf(a.parentId),
+      }))
+      const mergeDiff = res.merge
+        .map(([aId, bId]) => {
+          const a = st.nodes.find((n) => n.id === aId)
+          const b = st.nodes.find((n) => n.id === bId)
+          if (!a || !b) return null
+          return { aId, bId, aLabel: firstLine(a.data.content) || aId, bLabel: firstLine(b.data.content) || bId }
         })
-        newEdges.push({ id: `e-${a.parentId}-${id}`, source: a.parentId, target: id, data: { read: false } })
-      })
-      const delIds = []
-      res.merge.forEach(([aId, bId]) => {
-        const a = st.nodes.find((n) => n.id === aId)
-        const b = st.nodes.find((n) => n.id === bId)
-        if (a && b) {
-          const merged = (a.data.content ? a.data.content + '\n' : '') + (b.data.content || '')
-          st.updateNodeData(aId, { content: merged })
-          delIds.push(bId)
-        }
-      })
-      if (delIds.length) delIds.forEach((id) => st.deleteNode(id))
-      if (newNodes.length) st.addNodesAndEdges(newNodes, newEdges)
-      let relCount = 0
+        .filter(Boolean)
+      let relDiff = []
       try {
         const suggested = await autoRelate(settings, graph)
         const existing = new Set(st.edges.map((e) => `${e.source}-${e.target}`))
-        const relEdges = []
-        for (const ed of suggested) {
-          if (!ed.source || !ed.target || ed.source === ed.target) continue
-          const key = `${ed.source}-${ed.target}`
-          if (existing.has(key)) continue
-          existing.add(key)
-          relEdges.push({
-            id: `e-rel-${ed.source}-${ed.target}`, source: ed.source, target: ed.target,
-            data: { reason: ed.reason || '' },
-          })
-        }
-        if (relEdges.length) st.addNodesAndEdges([], relEdges)
-        relCount = relEdges.length
+        relDiff = suggested
+          .filter((ed) => ed.source && ed.target && ed.source !== ed.target && !existing.has(`${ed.source}-${ed.target}`))
+          .map((ed) => ({
+            source: ed.source,
+            target: ed.target,
+            reason: ed.reason || '',
+            sLabel: firstLine(st.nodes.find((n) => n.id === ed.source)?.data.content) || ed.source,
+            tLabel: firstLine(st.nodes.find((n) => n.id === ed.target)?.data.content) || ed.target,
+          }))
       } catch { /* 不阻断 */ }
-      setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 80)
-      const summary = `优化完成：新增 ${newNodes.length} 个节点，合并 ${res.merge.length} 组，新增关联 ${relCount} 条。${res.notes ? '\n' + res.notes : ''}`
-      setMessages((m) => [...m, { role: 'assistant', content: summary }])
-      onStatus?.(`POP！已优化 ${newNodes.length + res.merge.length + relCount} 处`)
+      const diff = { add: addDiff, merge: mergeDiff, relate: relDiff, notes: res.notes || '' }
+      setReviewDiff(diff)
+      setReviewSel({ add: addDiff.map(() => true), merge: mergeDiff.map(() => true), relate: relDiff.map(() => true) })
+      setBusy(false)
     } catch (e) {
       setError(e.message || '优化失败')
       onStatus?.('没憋出来，再补点细节试试')
-    } finally {
       setBusy(false)
     }
+  }
+
+  // 勾选切换（按类型 + 索引）
+  const toggleReview = (type, i, val) => {
+    setReviewSel((prev) => {
+      const next = { ...prev, [type]: prev[type].slice() }
+      next[type][i] = val
+      return next
+    })
+  }
+  const selectAllReview = () => {
+    if (!reviewDiff) return
+    setReviewSel({
+      add: reviewDiff.add.map(() => true),
+      merge: reviewDiff.merge.map(() => true),
+      relate: reviewDiff.relate.map(() => true),
+    })
+  }
+  const anyReviewChecked = () =>
+    reviewSel.add.some(Boolean) || reviewSel.merge.some(Boolean) || reviewSel.relate.some(Boolean)
+
+  // 应用被勾选的改动（其余丢弃）
+  const applyReview = () => {
+    const diff = reviewDiff
+    if (!diff) return
+    const st = useStore.getState()
+    const newNodes = []
+    const newEdges = []
+    const exist = new Set(st.edges.map((e) => `${e.source}-${e.target}`))
+    reviewSel.add.forEach((on, i) => {
+      if (!on) return
+      const a = diff.add[i]
+      const parent = st.nodes.find((n) => n.id === a.parentId) || st.nodes[0]
+      if (!parent) return
+      const id = nanoid(6)
+      const pos = findFreePosition(parent, [...st.nodes, ...newNodes])
+      newNodes.push({
+        id, type: 'custom', position: pos,
+        data: { type: a.type || 'step', content: [a.title, a.body].filter(Boolean).join('\n'), ai: true, read: false },
+      })
+      newEdges.push({ id: `e-${a.parentId}-${id}`, source: a.parentId, target: id, data: { read: false } })
+    })
+    const delIds = []
+    reviewSel.merge.forEach((on, i) => {
+      if (!on) return
+      const { aId, bId } = diff.merge[i]
+      const a = st.nodes.find((n) => n.id === aId)
+      const b = st.nodes.find((n) => n.id === bId)
+      if (a && b) {
+        const merged = (a.data.content ? a.data.content + '\n' : '') + (b.data.content || '')
+        st.updateNodeData(aId, { content: merged })
+        delIds.push(bId)
+      }
+    })
+    if (delIds.length) delIds.forEach((id) => st.deleteNode(id))
+    const relEdges = []
+    reviewSel.relate.forEach((on, i) => {
+      if (!on) return
+      const ed = diff.relate[i]
+      const key = `${ed.source}-${ed.target}`
+      if (exist.has(key)) return
+      exist.add(key)
+      relEdges.push({
+        id: `e-rel-${ed.source}-${ed.target}-${nanoid(4)}`, source: ed.source, target: ed.target,
+        data: { reason: ed.reason || '' },
+      })
+    })
+    if (newNodes.length) st.addNodesAndEdges(newNodes, newEdges)
+    if (relEdges.length) st.addNodesAndEdges([], relEdges)
+    const appliedAdd = reviewSel.add.filter(Boolean).length
+    const appliedMerge = reviewSel.merge.filter(Boolean).length
+    const appliedRel = reviewSel.relate.filter(Boolean).length
+    setTimeout(() => fitView({ padding: 0.2, duration: 400 }), 80)
+    const summary = `已应用优化：新增 ${appliedAdd} 个节点，合并 ${appliedMerge} 组，新增关联 ${appliedRel} 条。${diff.notes ? '\n' + diff.notes : ''}`
+    setMessages((m) => [...m, { role: 'assistant', content: summary }])
+    onStatus?.(`POP！已优化 ${appliedAdd + appliedMerge + appliedRel} 处`)
+    setReviewDiff(null)
   }
 
   // 重新排版：基于 dagre 的有向图分层布局（优化画布用）
@@ -938,10 +1026,6 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
                   <option value="gpt-4o" /><option value="gpt-4o-mini" />
                   <option value="claude-3-5-sonnet-20241022" /><option value="qwen-max" />
                 </datalist>
-                <label className="settings-toggle">
-                  <input type="checkbox" checked={!!settings.resetOnStart} onChange={(e) => update({ resetOnStart: e.target.checked })} />
-                  <span>启动即清空（演示模式）</span>
-                </label>
                 <div className="settings-tip">
                   默认 DeepSeek（OpenAI 兼容）。DeepSeek 官方模型请填 <code>deepseek-v4-pro</code> 或 <code>deepseek-v4-flash</code>；
                   旧版 <code>deepseek-chat</code> / <code>deepseek-reasoner</code> 将于 2026/07/24 弃用。
@@ -1092,6 +1176,62 @@ const AIPanel = forwardRef(function AIPanel({ splitPct = 45, externalInput, onSt
                 <button className="primary" onClick={doImport} disabled={importBusy}>{importBusy ? '拆解中…' : '拆解成图谱'}</button>
                 <button onClick={() => { setShowImport(false); setImportText(''); setImportFileObj(null); setImportUrl(''); setImportErr('') }}>取消</button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 优化画布 · 批量审阅（Human-in-the-loop）：逐条确认后再应用 */}
+      {reviewDiff && (
+        <div className="modal-mask" onClick={() => setReviewDiff(null)}>
+          <div className="backup-modal review-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="优化审阅">
+            <div className="backup-head">
+              <span>⚡ 优化审阅 · 请确认要应用的改动</span>
+              <button className="report-close" onClick={() => setReviewDiff(null)}>关闭</button>
+            </div>
+            <div className="review-body">
+              {reviewDiff.add.length === 0 && reviewDiff.merge.length === 0 && reviewDiff.relate.length === 0 && (
+                <div className="insp-empty">AI 未提出可应用的改动。</div>
+              )}
+              {reviewDiff.add.length > 0 && (
+                <div className="review-sec">
+                  <div className="review-sec-title">新增节点（{reviewDiff.add.length}）</div>
+                  {reviewDiff.add.map((a, i) => (
+                    <label className="review-item" key={i}>
+                      <input type="checkbox" checked={reviewSel.add[i]} onChange={(e) => toggleReview('add', i, e.target.checked)} />
+                      <span><b>{a.label}</b> <span className="review-sub">挂在「{a.parentLabel}」下</span></span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {reviewDiff.merge.length > 0 && (
+                <div className="review-sec">
+                  <div className="review-sec-title">合并节点（{reviewDiff.merge.length}）</div>
+                  {reviewDiff.merge.map((m, i) => (
+                    <label className="review-item" key={i}>
+                      <input type="checkbox" checked={reviewSel.merge[i]} onChange={(e) => toggleReview('merge', i, e.target.checked)} />
+                      <span>把 <b>{m.bLabel}</b> 合并进 <b>{m.aLabel}</b>（保留前者，删除后者）</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {reviewDiff.relate.length > 0 && (
+                <div className="review-sec">
+                  <div className="review-sec-title">新增关联（{reviewDiff.relate.length}）</div>
+                  {reviewDiff.relate.map((r, i) => (
+                    <label className="review-item" key={i}>
+                      <input type="checkbox" checked={reviewSel.relate[i]} onChange={(e) => toggleReview('relate', i, e.target.checked)} />
+                      <span><b>{r.sLabel}</b> → <b>{r.tLabel}</b></span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {reviewDiff.notes && <div className="review-notes">📝 {reviewDiff.notes}</div>}
+            </div>
+            <div className="confirm-actions">
+              <button onClick={() => setReviewDiff(null)}>取消</button>
+              <button onClick={selectAllReview}>全选</button>
+              <button className="primary" onClick={applyReview} disabled={!anyReviewChecked()}>应用选中</button>
             </div>
           </div>
         </div>

@@ -2133,6 +2133,66 @@ input, textarea, select { font-family: inherit; }
   border: 1.5px solid var(--black);
 }
 
+/* 多画布：当前画布高亮 + 跨画布关联标识 + 新建按钮 */
+.rel-row.is-current {
+  border-color: var(--hotpink);
+  box-shadow: 3px 3px 0 var(--hotpink);
+}
+.rel-row.rel-cross {
+  border-left: 6px solid var(--blue);
+}
+.insp-add-canvas {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: var(--border-thick) solid var(--black);
+  border-radius: var(--radius);
+  background: var(--yellow);
+  font-weight: 700;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.insp-add-canvas:hover {
+  transform: translate(-2px, -1px);
+  box-shadow: 3px 3px 0 var(--hotpink);
+}
+
+/* 画布行内重命名 */
+.rel-rename-btn {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-soft, #888);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.rel-row:hover .rel-rename-btn {
+  opacity: 1;
+}
+.rel-rename-btn:hover {
+  color: var(--hotpink);
+  background: rgba(0, 0, 0, 0.06);
+}
+.rel-edit-input {
+  flex: 1;
+  min-width: 0;
+  margin-right: 6px;
+  padding: 3px 6px;
+  border: 2px solid var(--hotpink);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: inherit;
+  outline: none;
+  background: #fff;
+}
+
 /* 数据面板 */
 .stat-grid {
   display: grid;
@@ -2821,3 +2881,139 @@ input, textarea, select { font-family: inherit; }
   .graph-modal { width: 96vw; height: 80vh; }
   .backup-modal { width: 96vw; }
 }
+
+/* 跨画布关联：幽灵节点（其它画布端的虚框占位） */
+.ghost-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 8px 10px;
+  border: 2px dashed var(--hotpink, #ff2e92);
+  border-radius: 10px;
+  background: rgba(255, 46, 146, 0.06);
+  color: var(--hotpink, #ff2e92);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+.ghost-node:hover { background: rgba(255, 46, 146, 0.12); }
+.ghost-arrow { line-height: 1.3; }
+.ghost-del {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--hotpink, #ff2e92);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.ghost-del:hover { opacity: 0.6; }
+.cross-ghost-edge .react-flow__edge-path {
+  stroke: var(--hotpink, #ff2e92);
+  stroke-dasharray: 6 4;
+}
+
+/* 跨画布关联创建入口（卡片头 ⇄ 按钮） */
+.node-link-canvas {
+  margin-left: auto;
+  border: 2px solid var(--hotpink, #ff2e92);
+  background: rgba(255, 46, 146, 0.08);
+  color: var(--hotpink, #ff2e92);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+.node-link-canvas:hover { background: rgba(255, 46, 146, 0.16); }
+.node-link-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 220px;
+  padding: 10px;
+  background: #fff;
+  border: 2px solid var(--black, #111);
+  border-radius: 10px;
+  box-shadow: 4px 4px 0 var(--hotpink, #ff2e92);
+}
+.nl-title { font-weight: 700; font-size: 12px; }
+.nl-empty { font-size: 12px; color: #888; }
+.nl-select {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: 12px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-family: inherit;
+}
+.nl-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.nl-cancel, .nl-ok {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--black, #111);
+  cursor: pointer;
+}
+.nl-cancel { background: #fff; }
+.nl-ok { background: var(--hotpink, #ff2e92); color: #fff; border-color: var(--hotpink, #ff2e92); }
+.nl-ok:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 优化画布批量审阅（Human-in-the-loop）—— 沿用【设置】面板的留白与粗黑边框质感 */
+.review-modal { width: 92vw; max-width: 520px; }
+.review-body { display: flex; flex-direction: column; gap: 16px; padding: 16px; max-height: 62vh; overflow-y: auto; }
+.review-sec {
+  border: 2px solid var(--black);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.review-sec-title { font-weight: 700; font-size: 14px; color: var(--black); }
+.review-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 2px solid var(--black);
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.12s ease;
+}
+.review-item:hover { background: #fafafa; }
+.review-item input { margin-top: 2px; flex: 0 0 auto; width: 16px; height: 16px; accent-color: var(--hotpink, #ff2e92); }
+.review-sub { color: #888; font-size: 12px; }
+.review-notes {
+  padding: 10px 12px;
+  background: rgba(255, 46, 146, 0.06);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #555;
+  line-height: 1.5;
+}
+/* 审阅面板底部操作区：与设置面板一致的留白与顶部分隔 */
+.review-modal .confirm-actions {
+  padding: 12px 16px;
+  border-top: 2px solid var(--black);
+}
+.review-modal .confirm-actions button.primary {
+  background: var(--hotpink);
+  color: #fff;
+  border: 2px solid var(--black);
+  border-radius: 6px;
+  padding: 8px 18px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.review-modal .confirm-actions button.primary:disabled { opacity: 0.4; cursor: not-allowed; }

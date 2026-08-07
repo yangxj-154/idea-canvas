@@ -6,7 +6,6 @@ import {
   ReactFlowProvider,
   Background,
   MiniMap,
-  Controls,
   useReactFlow,
   SelectionMode,
   getNodesBounds,
@@ -15,13 +14,11 @@ import {
 import { useStore } from './store'
 import { NODE_TYPES, NODE_TYPE_KEYS } from './nodeTypes'
 import CustomNode from './CustomNode'
+import GhostNode from './GhostNode'
 import Markdown from './Markdown'
 import AIPanel from './AIPanel'
 import Inspector from './Inspector'
-import { loadSettings, saveChat } from './settings'
-import { DEFAULT_SETTINGS } from './ai'
-
-const nodeTypes = { custom: CustomNode }
+const nodeTypes = { custom: CustomNode, ghost: GhostNode }
 
 // 固定引用，避免 React Flow 因 prop 对象变化反复重置内部边状态
 const DEFAULT_EDGE_OPTIONS = { type: 'default' }
@@ -69,6 +66,7 @@ function Canvas() {
     setDetailNode, updateNodeData, selectedNodeId, collapsed,
     selectionMode, setSelectionMode, setSelectedNodeIds,
     undo, redo, saveStatus, past, future,
+    crossEdges, canvases, currentId, switchCanvas,
   } = useStore()
   const { screenToFlowPosition, fitView, zoomIn, zoomOut, setCenter } = useReactFlow()
   const [inspector, setInspector] = useState(null)
@@ -170,21 +168,10 @@ function Canvas() {
     }
   }, [])
 
-  // 启动加载：开发/演示模式（resetOnStart）下每次清空画布与对话，恢复初始界面；
-  // 正式投用时在「设置」关闭该开关，即恢复「保留上次信息」的行为。
+  // 启动加载：始终从本地持久层恢复。load 内部兼容旧单画布数据并迁移为多画布结构，
+  // 不再有「启动自动清空」逻辑——清空仅由用户主动点「清空画布」触发，彻底杜绝静默丢数据。
   useEffect(() => {
-    (async () => {
-      const s = await loadSettings()
-      const eff = { ...DEFAULT_SETTINGS, ...(s || {}) }
-      if (eff.resetOnStart) {
-        useStore.getState().resetToInitial()
-        await saveChat({ messages: [], threads: {} })
-        localStorage.removeItem('lapop-welcome-seen')
-        setWelcomeOpen(true)
-      } else {
-        await useStore.getState().load()
-      }
-    })()
+    useStore.getState().load()
   }, [])
 
   // 导出下拉：点击外部关闭
@@ -251,7 +238,11 @@ function Canvas() {
 
   const dispEdges = useMemo(() => {
     const typeOf = (id) => nodes.find((n) => n.id === id)?.data.type
-    return edges.map((e) => {
+    const nodeIds = new Set(nodes.map((n) => n.id))
+    // 单画布视图只渲染「两端都在本画布」的边；跨画布边在关系图谱全局视图展示
+    return edges
+      .filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target))
+      .map((e) => {
       const cross = rootOf.get(e.source) !== rootOf.get(e.target)
       const hidden = !!filterType && (typeOf(e.source) !== filterType || typeOf(e.target) !== filterType)
       const inChain = chainSet.size > 1 && chainSet.has(e.source) && chainSet.has(e.target)
@@ -261,6 +252,66 @@ function Canvas() {
       return { ...e, hidden, className: cls || undefined }
     })
   }, [edges, inspector, filterType, rootOf, nodes, chainSet])
+
+  // 跨画布关联：把另一端在其它画布的边，以「幽灵节点 + 虚线边」渲染在当前画布中
+  const crossGhost = useMemo(() => {
+    const gNodes = []
+    const gEdges = []
+    const canvasById = new Map(canvases.map((c) => [c.id, c]))
+    const canvasName = (cid) => canvasById.get(cid)?.name || cid
+    const nodeLabel = (cid, nid) => {
+      const n = canvasById.get(cid)?.nodes.find((x) => x.id === nid)
+      const txt = (n?.data?.content || '').split('\n').find((l) => l.trim()) || '（空卡片）'
+      return txt.slice(0, 20)
+    }
+    for (const ce of crossEdges) {
+      if (ce.sourceCanvas === currentId) {
+        const src = nodes.find((n) => n.id === ce.source)
+        if (!src) continue
+        const gid = `ghost-${ce.id}-t`
+        gNodes.push({
+          id: gid,
+          type: 'ghost',
+          draggable: false,
+          connectable: false,
+          selectable: true,
+          position: { x: src.position.x + 300, y: src.position.y },
+          data: {
+            isGhost: true,
+            crossId: ce.id,
+            ghostLabel: `→ 画布「${canvasName(ce.targetCanvas)}」：${nodeLabel(ce.targetCanvas, ce.target)}`,
+            jumpCanvas: ce.targetCanvas,
+            jumpNode: ce.target,
+          },
+        })
+        gEdges.push({ id: `ce-${ce.id}-e`, source: ce.source, target: gid, animated: true, className: 'cross-ghost-edge' })
+      } else if (ce.targetCanvas === currentId) {
+        const tgt = nodes.find((n) => n.id === ce.target)
+        if (!tgt) continue
+        const gid = `ghost-${ce.id}-s`
+        gNodes.push({
+          id: gid,
+          type: 'ghost',
+          draggable: false,
+          connectable: false,
+          selectable: true,
+          position: { x: tgt.position.x - 300, y: tgt.position.y },
+          data: {
+            isGhost: true,
+            crossId: ce.id,
+            ghostLabel: `画布「${canvasName(ce.sourceCanvas)}」：${nodeLabel(ce.sourceCanvas, ce.source)} →`,
+            jumpCanvas: ce.sourceCanvas,
+            jumpNode: ce.source,
+          },
+        })
+        gEdges.push({ id: `ce-${ce.id}-e`, source: gid, target: ce.target, animated: true, className: 'cross-ghost-edge' })
+      }
+    }
+    return { gNodes, gEdges }
+  }, [crossEdges, canvases, currentId, nodes])
+
+  const displayNodes = useMemo(() => [...dispNodes, ...crossGhost.gNodes], [dispNodes, crossGhost])
+  const displayEdges = useMemo(() => [...dispEdges, ...crossGhost.gEdges], [dispEdges, crossGhost])
 
   const onAdd = (type) => {
     const center = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
@@ -384,6 +435,18 @@ function Canvas() {
   // 固定 React Flow 事件回调引用，避免每次渲染重新订阅导致
   // onSelectionChange 在订阅瞬间被触发 → setSelectedNodeIds → 重渲染 → 再订阅 的无限循环
   const onNodeClick = useCallback((_, node) => {
+    if (node.data?.isGhost) {
+      const { jumpCanvas, jumpNode } = node.data
+      switchCanvas(jumpCanvas)
+      // 切画布后 nodes 投影更新，用 getState 取最新再聚焦，避免闭包取到旧 nodes
+      setTimeout(() => {
+        const st = useStore.getState()
+        if (st.nodes.some((n) => n.id === jumpNode)) {
+          fitView({ nodes: [{ id: jumpNode }], padding: 0.3, duration: 500, maxZoom: 1.2 })
+        }
+      }, 160)
+      return
+    }
     setSelectedNode(node.id)
     aiPanelRef.current?.scrollToType?.(node.data?.type)
   }, [])
@@ -524,8 +587,8 @@ function Canvas() {
           onDrop={onDrop}
         >
           <ReactFlow
-            nodes={dispNodes}
-            edges={dispEdges}
+            nodes={displayNodes}
+            edges={displayEdges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
@@ -546,7 +609,6 @@ function Canvas() {
           >
             <Background gap={30} color="#e5e5e5" size={1.5} />
             <MiniMap pannable zoomable nodeColor={(n) => NODE_TYPES[n.data?.type || 'idea']?.color || '#FF2E92'} maskColor="rgba(0,0,0,0.7)" />
-            <Controls showInteractive={false} position="bottom-right" />
           </ReactFlow>
 
           {/* 画布空状态：品牌视觉锤 */}

@@ -10,8 +10,21 @@ export default function CustomNode({ id, data, selected }) {
   const updateNodeData = useStore((s) => s.updateNodeData)
   const deleteNode = useStore((s) => s.deleteNode)
   const setDetailNode = useStore((s) => s.setDetailNode)
+  const canvases = useStore((s) => s.canvases)
+  const currentId = useStore((s) => s.currentId)
+  const addCrossEdge = useStore((s) => s.addCrossEdge)
+  // 仅当本卡片确实参与跨画布关联时才显示 ⇄ 按钮（后台自动判断，无需每张卡都显示）
+  const crossEdges = useStore((s) => s.crossEdges)
+  const myEdge = crossEdges.find((e) => e.source === id || e.target === id)
+  const hasCross = !!myEdge
+  const defaultLinkCanvas = myEdge
+    ? (myEdge.sourceCanvas === currentId ? myEdge.targetCanvas : myEdge.sourceCanvas)
+    : (canvases.find((c) => c.id !== currentId)?.id || '')
   const [editing, setEditing] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [linkOpen, setLinkOpen] = useState(false)
+  const [linkCanvas, setLinkCanvas] = useState('')
+  const [linkNode, setLinkNode] = useState('')
   const startRef = useRef(data.content)
 
   // 仅 read === true 视为已读；其余（含存量无字段节点、手动新建）均为未读
@@ -81,7 +94,66 @@ export default function CustomNode({ id, data, selected }) {
         <button className="node-del" title="删除卡片" onClick={onDelete}>
           ×
         </button>
+        {hasCross && (
+          <button
+            className="node-link-canvas"
+            title="关联到其它画布的节点"
+            onClick={(e) => {
+              e.stopPropagation()
+              setLinkCanvas(defaultLinkCanvas)
+              setLinkNode('')
+              setLinkOpen((v) => !v)
+            }}
+          >
+            ⇄
+          </button>
+        )}
       </div>
+      {linkOpen && (
+        <div className="node-link-pop" onClick={(e) => e.stopPropagation()}>
+          <div className="nl-title">关联到其它画布</div>
+          {!linkCanvas ? (
+            <div className="nl-empty">需至少两个画布</div>
+          ) : (
+            <>
+              <select
+                className="nl-select"
+                value={linkCanvas}
+                onChange={(e) => { setLinkCanvas(e.target.value); setLinkNode('') }}
+              >
+                {canvases.filter((c) => c.id !== currentId).map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}（{c.nodes.length} 节点）</option>
+                ))}
+              </select>
+              <select
+                className="nl-select"
+                value={linkNode}
+                onChange={(e) => setLinkNode(e.target.value)}
+              >
+                <option value="">选择目标节点…</option>
+                {(canvases.find((c) => c.id === linkCanvas)?.nodes || []).map((n) => {
+                  const label = (n.data?.content || '').split('\n').find((l) => l.trim()) || '（空卡片）'
+                  return <option key={n.id} value={n.id}>{label.slice(0, 24)}</option>
+                })}
+              </select>
+              <div className="nl-actions">
+                <button className="nl-cancel" onClick={() => setLinkOpen(false)}>取消</button>
+                <button
+                  className="nl-ok"
+                  disabled={!linkNode}
+                  onClick={() => {
+                    if (!linkNode) return
+                    addCrossEdge({ source: id, sourceCanvas: currentId, target: linkNode, targetCanvas: linkCanvas })
+                    setLinkOpen(false)
+                  }}
+                >
+                  关联
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* 主体：标题 + 描述 + 时间戳 */}
       <div className="node-body" onDoubleClick={enterEdit}>

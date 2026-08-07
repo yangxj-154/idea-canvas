@@ -18,25 +18,41 @@ export async function saveSettings(s) {
   }
 }
 
-// 会话持久化：主会话 messages + 每个节点的下钻对话 threads（nodeId -> 消息数组）
+// 会话持久化：按画布隔离的 map —— { [canvasId]: { messages, threads } }
+// 每个画布拥有独立的主会话与节点下钻对话，切换画布互不干扰
 const CHAT_KEY = 'idea-canvas-chat'
 
 export async function loadChat() {
   try {
     const c = await get(CHAT_KEY)
-    if (!c) return { messages: [], threads: {} }
-    return {
-      messages: Array.isArray(c.messages) ? c.messages : [],
-      threads: c.threads && typeof c.threads === 'object' ? c.threads : {},
+    if (!c) return {}
+    // 兼容旧版全局结构 { messages, threads }（迁移为画布 c1）
+    if (Array.isArray(c.messages)) {
+      return {
+        c1: {
+          messages: c.messages,
+          threads: c.threads && typeof c.threads === 'object' ? c.threads : {},
+        },
+      }
     }
+    // 新版：已是按画布隔离的 map
+    const map = {}
+    for (const [id, v] of Object.entries(c)) {
+      if (!v || typeof v !== 'object') continue
+      map[id] = {
+        messages: Array.isArray(v.messages) ? v.messages : [],
+        threads: v.threads && typeof v.threads === 'object' ? v.threads : {},
+      }
+    }
+    return map
   } catch {
-    return { messages: [], threads: {} }
+    return {}
   }
 }
 
-export async function saveChat(data) {
+export async function saveChat(map) {
   try {
-    await set(CHAT_KEY, data)
+    await set(CHAT_KEY, map)
   } catch (e) {
     console.warn('保存会话失败', e)
   }
